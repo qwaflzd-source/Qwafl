@@ -1,29 +1,135 @@
-name: Flutter APK Build
+
+name: Build Flutter APK
 
 on:
-  push:
-    branches: [ main ]
   workflow_dispatch:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
 
 jobs:
   build:
+    name: Build Flutter Release APK
     runs-on: ubuntu-latest
+
     steps:
-      - uses: actions/checkout@v3
-      
-      - uses: subosito/flutter-action@v2
+
+      # Step 1: Checkout repository
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      # Step 2: Verify ZIP and install unzip
+      - name: Prepare ZIP Extraction
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y unzip
+
+          ZIP_FILE="$GITHUB_WORKSPACE/Flutter-App-Full-SourceCode.zip"
+
+          if [ ! -f "$ZIP_FILE" ]; then
+            echo "ERROR: ZIP file not found!"
+            echo "Files in repository:"
+            ls -lah "$GITHUB_WORKSPACE"
+            exit 1
+          fi
+
+          if ! unzip -t "$ZIP_FILE"; then
+            echo "ERROR: ZIP file is corrupted!"
+            exit 1
+          fi
+
+      # Step 3: Extract project
+      - name: Extract Flutter Project
+        run: |
+          EXTRACT_DIR="$RUNNER_TEMP/flutter_project"
+
+          mkdir -p "$EXTRACT_DIR"
+
+          unzip -q "$GITHUB_WORKSPACE/Flutter-App-Full-SourceCode.zip" \
+            -d "$EXTRACT_DIR"
+
+          echo "Extracted files:"
+          find "$EXTRACT_DIR" -maxdepth 3 -print | head -200
+
+          echo "Searching for Flutter project..."
+
+          PUBSPEC_FILES=$(find "$EXTRACT_DIR" \
+            -type f \
+            -name pubspec.yaml \
+            -not -path '*/.dart_tool/*')
+
+          if [ -z "$PUBSPEC_FILES" ]; then
+            echo "ERROR: pubspec.yaml was not found!"
+            exit 1
+          fi
+
+          PUBSPEC_COUNT=$(echo "$PUBSPEC_FILES" | wc -l)
+
+          if [ "$PUBSPEC_COUNT" -ne 1 ]; then
+            echo "ERROR: Multiple Flutter projects found!"
+            echo "$PUBSPEC_FILES"
+            exit 1
+          fi
+
+          PROJECT_DIR=$(dirname "$PUBSPEC_FILES")
+
+          if [ ! -d "$PROJECT_DIR/lib" ]; then
+            echo "ERROR: Flutter lib directory is missing!"
+            exit 1
+          fi
+
+          echo "Flutter project directory:"
+          echo "$PROJECT_DIR"
+
+          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
+
+      # Step 4: Setup Flutter
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
         with:
-          flutter-version: '3.16.x'
-          channel: 'stable'
-          
-      - name: Install Dependencies
-        run: flutter pub get
-        
-      - name: Build APK Release
-        run: flutter build apk --release
-        
+          channel: stable
+          cache: true
+
+      # Step 5: Verify environment
+      - name: Flutter Environment
+        run: |
+          flutter --version
+          flutter doctor -v
+
+      # Step 6: Install dependencies
+      - name: Install Flutter Dependencies
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          flutter pub get
+
+      # Step 7: Build APK
+      - name: Build Release APK
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          flutter build apk --release
+
+      # Step 8: Verify APK
+      - name: Verify APK
+        run: |
+          APK_PATH="$PROJECT_DIR/build/app/outputs/flutter-apk/app-release.apk"
+
+          if [ ! -f "$APK_PATH" ]; then
+            echo "ERROR: APK was not generated!"
+            find "$PROJECT_DIR/build" -type f -name "*.apk" || true
+            exit 1
+          fi
+
+          echo "APK successfully generated:"
+          ls -lh "$APK_PATH"
+
+      # Step 9: Upload APK
       - name: Upload APK Artifact
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
-          name: release-apk
-          path: build/app/outputs/flutter-apk/app-release.apk
+          name: Flutter-Release-APK
+          path: ${{ env.PROJECT_DIR }}/build/app/outputs/flutter-apk/app-release.apk
+          if-no-files-found: error
+          retention-days: 14
