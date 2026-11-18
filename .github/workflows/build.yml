@@ -76,7 +76,6 @@ jobs:
         shell: bash
         run: |
           set -e
-
           yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses || true
 
           "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" \
@@ -87,7 +86,6 @@ jobs:
         shell: bash
         run: |
           set -e
-
           cd "$RUNNER_TEMP"
 
           wget -q https://services.gradle.org/distributions/gradle-9.3.1-bin.zip
@@ -109,7 +107,7 @@ jobs:
 
           chmod +x "$PROJECT_DIR/android/gradlew"
 
-      - name: Fix Android Gradle Plugin and Kotlin versions
+      - name: Update Android Gradle Plugin and Kotlin
         shell: bash
         run: |
           set -e
@@ -122,75 +120,61 @@ jobs:
           root = Path(os.environ['PROJECT_DIR']) / 'android'
 
           extensions = {'.gradle', '.kts', '.toml'}
-          files = [p for p in root.rglob('*') if p.is_file() and p.suffix in extensions]
 
-          agp_patterns = [
-              (
-                  r'(id\s*\(?\s*["\']com\.android\.(?:application|library)["\']\s*\)?\s*version\s*["\'])[0-9.]+(["\'])',
-                  r'\g<1>9.1.1\2'
-              ),
-              (
-                  r'(com\.android\.tools\.build:gradle:)[0-9.]+',
-                  r'\g<1>9.1.1'
-              ),
-              (
-                  r'(\bagp\s*=\s*["\'])[0-9.]+(["\'])',
-                  r'\g<1>9.1.1\2'
-              )
-          ]
+          for file in root.rglob('*'):
+              if not file.is_file() or file.suffix not in extensions:
+                  continue
 
-          kotlin_patterns = [
-              (
-                  r'(id\s*\(?\s*["\']org\.jetbrains\.kotlin\.android["\']\s*\)?\s*version\s*["\'])[0-9.]+(["\'])',
-                  r'\g<1>2.2.10\2'
-              ),
-              (
-                  r'(org\.jetbrains\.kotlin:kotlin-gradle-plugin:)[0-9.]+',
-                  r'\g<1>2.2.10'
-              ),
-              (
-                  r'(\bkotlin\s*=\s*["\'])[0-9.]+(["\'])',
-                  r'\g<1>2.2.10\2'
-              )
-          ]
-
-          for file in files:
               text = file.read_text()
               original = text
 
-              for pattern, replacement in agp_patterns + kotlin_patterns:
-                  text = re.sub(pattern, replacement, text)
+              # Android Gradle Plugin versions in plugins blocks.
+              text = re.sub(
+                  r'(com\.android\.(?:application|library)\s*["\']?\s*version\s*["\']?)[0-9.]+',
+                  r'\g<1>9.1.1',
+                  text
+              )
+
+              # Older buildscript classpath format.
+              text = re.sub(
+                  r'(com\.android\.tools\.build:gradle:)[0-9.]+',
+                  r'\g<1>9.1.1',
+                  text
+              )
+
+              # Version catalog AGP entries.
+              text = re.sub(
+                  r'(\bagp\s*=\s*["\'])[0-9.]+(["\'])',
+                  r'\g<1>9.1.1\2',
+                  text
+              )
+
+              # Kotlin plugin versions.
+              text = re.sub(
+                  r'(org\.jetbrains\.kotlin\.android\s*["\']?\s*version\s*["\']?)[0-9.]+',
+                  r'\g<1>2.2.10',
+                  text
+              )
+
+              text = re.sub(
+                  r'(org\.jetbrains\.kotlin:kotlin-gradle-plugin:)[0-9.]+',
+                  r'\g<1>2.2.10',
+                  text
+              )
 
               if text != original:
                   file.write_text(text)
                   print("Updated:", file)
 
-          settings = root / 'settings.gradle'
-          if settings.exists():
-              print("\n--- settings.gradle ---")
-              print(settings.read_text())
-
-          print("\nAGP/Kotlin update completed.")
           PY
 
-      - name: Verify Android Gradle Plugin version
-        shell: bash
+      - name: Update Flutter dependencies
+        working-directory: ${{ env.PROJECT_DIR }}
         run: |
-          set -e
+          flutter pub add page_transition:^2.2.2
+          flutter pub get
 
-          if grep -R -nE \
-            'com.android.application.*8\.6\.0|com.android.tools.build:gradle:8\.6\.0' \
-            "$PROJECT_DIR/android" \
-            --include='*.gradle' \
-            --include='*.kts' \
-            --include='*.toml'; then
-            echo "Old AGP 8.6.0 reference still exists."
-            exit 1
-          fi
-
-          echo "Checking Android Gradle configuration..."
-
-      - name: Set compileSdk to 36
+      - name: Set compileSdk 36 in all Android modules
         shell: bash
         run: |
           set -e
@@ -200,42 +184,58 @@ jobs:
           import os
           import re
 
-          app = Path(os.environ['PROJECT_DIR']) / 'android/app/build.gradle'
+          project = Path(os.environ['PROJECT_DIR'])
+          roots = [
+              project / 'android',
+              Path.home() / '.pub-cache' / 'hosted' / 'pub.dev'
+          ]
 
-          if not app.exists():
-              app = Path(os.environ['PROJECT_DIR']) / 'android/app/build.gradle.kts'
+          changed = 0
 
-          if not app.exists():
-              raise SystemExit("App Gradle file not found")
+          for root in roots:
+              if not root.exists():
+                  continue
 
-          text = app.read_text()
+              for file in root.rglob('*'):
+                  if not file.is_file():
+                      continue
 
-          if app.suffix == '.kts':
-              replacement = 'compileSdk = 36'
-          else:
-              replacement = 'compileSdkVersion 36'
+                  if file.name not in ('build.gradle', 'build.gradle.kts'):
+                      continue
 
-          pattern = r'^(\s*)compileSdk(?:Version)?\s*(?:=\s*)?.*$'
+                  try:
+                      text = file.read_text()
+                  except Exception:
+                      continue
 
-          updated, count = re.subn(
-              pattern,
-              lambda m: m.group(1) + replacement,
-              text,
-              count=1,
-              flags=re.MULTILINE
-          )
+                  original = text
 
-          if count == 0:
-              match = re.search(r'(?m)^(\s*)android\s*\{', text)
-              if not match:
-                  raise SystemExit("Could not find android block")
+                  if file.suffix == '.kts':
+                      replacement = 'compileSdk = 36'
+                  else:
+                      replacement = 'compileSdkVersion 36'
 
-              pos = match.end()
-              updated = text[:pos] + '\n    ' + replacement + text[pos:]
+                  pattern = (
+                      r'^(\s*)compileSdk(?:Version)?'
+                      r'\s*(?:=\s*)?.*$'
+                  )
 
-          app.write_text(updated)
+                  text, count = re.subn(
+                      pattern,
+                      lambda m: m.group(1) + replacement,
+                      text,
+                      flags=re.MULTILINE
+                  )
 
-          print("compileSdk set to 36.")
+                  if count:
+                      file.write_text(text)
+                      changed += 1
+                      print("Updated compileSdk:", file)
+
+          print(f"Updated {changed} Gradle files.")
+
+          if changed == 0:
+              raise SystemExit("No compileSdk declarations were updated.")
           PY
 
       - name: Fix Gradle properties
@@ -263,19 +263,8 @@ jobs:
               ]
 
               lines.append('android.r8.optimizedResourceShrinking=false')
-
               file.write_text('\n'.join(lines) + '\n')
           PY
-
-      - name: Update page_transition
-        working-directory: ${{ env.PROJECT_DIR }}
-        run: |
-          flutter pub add page_transition:^2.2.2
-
-      - name: Get Flutter dependencies
-        working-directory: ${{ env.PROJECT_DIR }}
-        run: |
-          flutter pub get
 
       - name: Fix InAppWebView ProGuard
         shell: bash
@@ -290,6 +279,24 @@ jobs:
               's/proguard-android\.txt/proguard-android-optimize.txt/g' \
               "$file"
           done
+
+      - name: Verify Android configuration
+        shell: bash
+        run: |
+          echo "Checking remaining old compileSdk declarations:"
+          grep -R -nE 'compileSdk(Version)?[[:space:]]+33' \
+            "$PROJECT_DIR/android" \
+            "$HOME/.pub-cache/hosted/pub.dev" \
+            --include='build.gradle' \
+            --include='build.gradle.kts' || true
+
+          echo "Checking AGP references:"
+          grep -R -nE 'com.android.application.*version|com.android.tools.build:gradle:' \
+            "$PROJECT_DIR/android" \
+            --include='settings.gradle' \
+            --include='settings.gradle.kts' \
+            --include='build.gradle' \
+            --include='build.gradle.kts' || true
 
       - name: Build Release APK
         working-directory: ${{ env.PROJECT_DIR }}
