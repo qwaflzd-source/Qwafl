@@ -23,18 +23,21 @@ jobs:
           java-version: '17'
 
       - name: Install dependencies
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq unzip
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq unzip
 
       - name: Extract Flutter project
         shell: bash
         run: |
           set -e
+
           mkdir -p "$RUNNER_TEMP/flutter_source"
 
           ZIP_FILE=$(find "$GITHUB_WORKSPACE" -maxdepth 2 -name "Flutter-App-Full-SourceCode.zip" -print -quit)
 
           if [ -z "$ZIP_FILE" ]; then
-            echo "Project ZIP file not found"
+            echo "Flutter-App-Full-SourceCode.zip not found"
             exit 1
           fi
 
@@ -62,200 +65,178 @@ jobs:
           cache: true
 
       - name: Configure Java for Flutter
-        run: flutter config --jdk-dir="$JAVA_HOME"
+        run: |
+          flutter config --jdk-dir="$JAVA_HOME"
+          flutter --version
+          java -version
 
-      - name: Create Gradle Wrapper 9.3.1
+      - name: Install Android SDK 36
+        shell: bash
+        run: |
+          set -e
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses || true
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" \
+            "platforms;android-36" \
+            "build-tools;36.0.0"
+
+      - name: Generate Gradle Wrapper 9.3.1
         shell: bash
         run: |
           set -e
 
-          GRADLE_DIR="$RUNNER_TEMP/gradle_setup"
-          mkdir -p "$GRADLE_DIR"
+          cd "$RUNNER_TEMP"
 
-          curl -fL --retry 3 \
-            https://services.gradle.org/distributions/gradle-9.3.1-bin.zip \
-            -o "$RUNNER_TEMP/gradle-9.3.1-bin.zip"
-
-          unzip -q "$RUNNER_TEMP/gradle-9.3.1-bin.zip" -d "$GRADLE_DIR"
+          wget -q https://services.gradle.org/distributions/gradle-9.3.1-bin.zip
+          unzip -q gradle-9.3.1-bin.zip
 
           mkdir -p "$RUNNER_TEMP/wrapper_project"
           cd "$RUNNER_TEMP/wrapper_project"
 
           echo "rootProject.name = 'wrapper_project'" > settings.gradle
-          echo " " > build.gradle
 
-          "$GRADLE_DIR/gradle-9.3.1/bin/gradle" wrapper \
-            --gradle-version 9.3.1 \
-            --distribution-type bin
+          "$RUNNER_TEMP/gradle-9.3.1/bin/gradle" wrapper --gradle-version 9.3.1
 
           mkdir -p "$PROJECT_DIR/android/gradle/wrapper"
 
           cp gradlew "$PROJECT_DIR/android/"
           cp gradlew.bat "$PROJECT_DIR/android/"
-          cp gradle/wrapper/gradle-wrapper.jar "$PROJECT_DIR/android/gradle/wrapper/"
-          cp gradle/wrapper/gradle-wrapper.properties "$PROJECT_DIR/android/gradle/wrapper/"
+          cp gradle/wrapper/* "$PROJECT_DIR/android/gradle/wrapper/"
 
           chmod +x "$PROJECT_DIR/android/gradlew"
 
           cd "$PROJECT_DIR/android"
           ./gradlew --version
 
-      - name: Update Android Gradle Plugin and Kotlin
+      - name: Update Android Gradle and Kotlin versions
         shell: bash
         run: |
-          python3 - <<'PY'
-          import os
-          import re
+          set -e
+
+          python3 <<'PY'
           from pathlib import Path
+          import re
 
-          root = Path(os.environ["PROJECT_DIR"]) / "android"
+          root = Path(__import__('os').environ['PROJECT_DIR']) / 'android'
 
-          files = [
-              root / "settings.gradle",
-              root / "settings.gradle.kts",
-              root / "build.gradle",
-              root / "build.gradle.kts",
-          ]
-
-          agp_updated = False
+          files = list(root.rglob('*.gradle')) + list(root.rglob('*.gradle.kts'))
 
           for file in files:
-              if not file.exists():
-                  continue
+              text = file.read_text()
 
-              content = file.read_text()
-
-              content, count = re.subn(
-                  r'((?:id\s*\(?\s*["\']com\.android\.(?:application|library)["\']\s*\)?\s*version\s*)["\'])[^"\']+(["\'])',
-                  r'\g<1>9.1.1\g<2>',
-                  content
-              )
-              agp_updated |= count > 0
-
-              content, count = re.subn(
-                  r'(com\.android\.tools\.build:gradle:)[0-9.]+',
+              text = re.sub(
+                  r'(com\.android\.application["\']?\s*version\s*["\']?)[0-9.]+',
                   r'\g<1>9.1.1',
-                  content
-              )
-              agp_updated |= count > 0
-
-              content = re.sub(
-                  r'((?:id\s*\(?\s*["\']org\.jetbrains\.kotlin\.android["\']\s*\)?\s*version\s*)["\'])[^"\']+(["\'])',
-                  r'\g<1>2.2.10\g<2>',
-                  content
+                  text
               )
 
-              content = re.sub(
-                  r'(org\.jetbrains\.kotlin:kotlin-gradle-plugin:)[0-9.]+',
+              text = re.sub(
+                  r'(com\.android\.library["\']?\s*version\s*["\']?)[0-9.]+',
+                  r'\g<1>9.1.1',
+                  text
+              )
+
+              text = re.sub(
+                  r'com\.android\.tools\.build:gradle:[0-9.]+',
+                  'com.android.tools.build:gradle:9.1.1',
+                  text
+              )
+
+              text = re.sub(
+                  r'(org\.jetbrains\.kotlin\.android["\']?\s*version\s*["\']?)[0-9.]+',
                   r'\g<1>2.2.10',
-                  content
+                  text
               )
 
-              file.write_text(content)
+              text = re.sub(
+                  r'org\.jetbrains\.kotlin:kotlin-gradle-plugin:[0-9.]+',
+                  'org.jetbrains.kotlin:kotlin-gradle-plugin:2.2.10',
+                  text
+              )
 
-          if not agp_updated:
-              raise SystemExit("Could not find Android Gradle Plugin version")
+              file.write_text(text)
 
-          print("Android Gradle Plugin updated to 9.1.1")
+          print("Gradle and Kotlin versions updated.")
           PY
 
-      - name: Configure Gradle properties
+      - name: Fix Gradle properties and compileSdk
         shell: bash
         run: |
-          python3 - <<'PY'
-          import os
-          import re
+          set -e
+
+          python3 <<'PY'
           from pathlib import Path
+          import re
+          import os
 
-          project = Path(os.environ["PROJECT_DIR"])
+          root = Path(os.environ['PROJECT_DIR']) / 'android'
 
-          for file in project.rglob("gradle.properties"):
-              content = file.read_text()
+          # Update compileSdk to 36 in all Android Gradle files.
+          files = list(root.rglob('*.gradle')) + list(root.rglob('*.gradle.kts'))
 
-              content = re.sub(
-                  r"(?m)^\s*android\.defaults\.buildfeatures\.buildconfig\s*=.*(?:\r?\n|$)",
-                  "",
-                  content
-              )
+          for file in files:
+              text = file.read_text()
 
-              content = re.sub(
-                  r"(?m)^\s*android\.r8\.optimizedResourceShrinking\s*=.*(?:\r?\n|$)",
-                  "",
-                  content
-              )
+              replacements = [
+                  (r'compileSdkVersion\s*=\s*[^\s;]+', 'compileSdkVersion = 36'),
+                  (r'compileSdkVersion\s+[^\s;]+', 'compileSdkVersion 36'),
+                  (r'compileSdk\s*=\s*[^\s;]+', 'compileSdk = 36'),
+                  (r'compileSdk\s+[^\s;]+', 'compileSdk 36'),
+              ]
 
-              file.write_text(content)
+              for pattern, replacement in replacements:
+                  text = re.sub(pattern, replacement, text)
 
-          properties = project / "android" / "gradle.properties"
+              file.write_text(text)
 
-          with properties.open("a") as f:
-              f.write("\nandroid.r8.optimizedResourceShrinking=false\n")
+          # Remove obsolete Gradle properties.
+          for file in root.rglob('gradle.properties'):
+              lines = file.read_text().splitlines()
 
-          print("Gradle properties configured")
+              lines = [
+                  line for line in lines
+                  if not line.strip().startswith(
+                      'android.defaults.buildfeatures.buildconfig='
+                  )
+                  and not line.strip().startswith(
+                      'android.r8.optimizedResourceShrinking='
+                  )
+              ]
+
+              lines.append('android.r8.optimizedResourceShrinking=false')
+
+              file.write_text('\n'.join(lines) + '\n')
+
+          print("compileSdk updated to 36.")
           PY
 
-      - name: Update Android compileSdk
-        shell: bash
-        run: |
-          python3 - <<'PY'
-          import os
-          import re
-          from pathlib import Path
-
-          root = Path(os.environ["PROJECT_DIR"]) / "android"
-
-          patterns = [
-              (r'compileSdkVersion\s+\d+', 'compileSdkVersion 35'),
-              (r'compileSdk\s+\d+', 'compileSdk 35'),
-              (r'compileSdk\s*=\s*\d+', 'compileSdk = 35'),
-              (r'compileSdkVersion\s*=\s*\d+', 'compileSdkVersion = 35'),
-          ]
-
-          for file in list(root.rglob("*.gradle")) + list(root.rglob("*.gradle.kts")):
-              content = file.read_text()
-              updated = content
-
-              for pattern, replacement in patterns:
-                  updated = re.sub(pattern, replacement, updated)
-
-              if updated != content:
-                  file.write_text(updated)
-                  print(f"Updated compileSdk in {file}")
-          PY
-
-      - name: Upgrade page_transition
+      - name: Update page_transition dependency
         working-directory: ${{ env.PROJECT_DIR }}
-        run: flutter pub add page_transition:^2.2.2
+        run: |
+          flutter pub add page_transition:^2.2.2
 
       - name: Get Flutter dependencies
         working-directory: ${{ env.PROJECT_DIR }}
-        run: flutter pub get
+        run: |
+          flutter pub get
 
-      - name: Fix InAppWebView ProGuard setting
+      - name: Fix InAppWebView ProGuard compatibility
         shell: bash
         run: |
-          python3 - <<'PY'
-          from pathlib import Path
+          set -e
 
-          cache = Path.home() / ".pub-cache" / "hosted" / "pub.dev"
-
-          files = list(cache.glob(
-              "flutter_inappwebview_android-*/android/build.gradle"
-          ))
-
-          for file in files:
-              content = file.read_text()
-              content = content.replace(
-                  "proguard-android.txt",
-                  "proguard-android-optimize.txt"
-              )
-              file.write_text(content)
-              print(f"Checked: {file}")
-          PY
+          find "$HOME/.pub-cache/hosted/pub.dev" \
+            -path "*/flutter_inappwebview_android-*/android/build.gradle" \
+            -type f -print0 |
+          while IFS= read -r -d '' file; do
+            sed -i 's/proguard-android\.txt/proguard-android-optimize.txt/g' "$file"
+          done
 
       - name: Build Release APK
         working-directory: ${{ env.PROJECT_DIR }}
-        run: flutter build apk --release
+        run: |
+          flutter clean
+          flutter pub get
+          flutter build apk --release
 
       - name: Verify APK
         shell: bash
@@ -263,13 +244,13 @@ jobs:
           APK="$PROJECT_DIR/build/app/outputs/flutter-apk/app-release.apk"
 
           if [ ! -f "$APK" ]; then
-            echo "APK file was not generated"
+            echo "APK was not generated"
             exit 1
           fi
 
           ls -lh "$APK"
 
-      - name: Upload APK
+      - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
         with:
           name: Flutter-Release-APK
