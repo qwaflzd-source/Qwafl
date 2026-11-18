@@ -1,4 +1,3 @@
-
 name: Build Flutter APK
 
 on:
@@ -275,17 +274,17 @@ jobs:
           grep -A 2 "flutter_downloader:" pubspec.yaml
           flutter pub deps | grep flutter_downloader
 
-      - name: Build Release APK
+      - name: Build Debug APK
         working-directory: ${{ env.PROJECT_DIR }}
         run: |
           flutter clean
           flutter pub get
-          flutter build apk --release
+          flutter build apk --debug
 
       - name: Verify APK
         shell: bash
         run: |
-          APK="$PROJECT_DIR/build/app/outputs/flutter-apk/app-release.apk"
+          APK="$PROJECT_DIR/build/app/outputs/flutter-apk/app-debug.apk"
 
           if [ ! -f "$APK" ]; then
             echo "APK was not generated"
@@ -297,6 +296,6 @@ jobs:
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: Flutter-Release-APK
-          path: ${{ env.PROJECT_DIR }}/build/app/outputs/flutter-apk/app-release.apk
+          name: Flutter-Debug-APK
+          path: ${{ env.PROJECT_DIR }}/build/app/outputs/flutter-apk/app-debug.apk
           if-no-files-found: error
