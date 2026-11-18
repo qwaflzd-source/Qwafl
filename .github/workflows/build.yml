@@ -27,34 +27,53 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      # 3. Extract Flutter ZIP quietly
+      # 3. Extract ZIP and find Flutter project
       - name: Extract Flutter Source
         run: |
           sudo apt-get install -y -qq unzip
 
           ZIP_FILE="$GITHUB_WORKSPACE/Flutter-App-Full-SourceCode.zip"
+          EXTRACT_DIR="$RUNNER_TEMP/flutter_source"
 
           if [ ! -f "$ZIP_FILE" ]; then
             echo "ERROR: ZIP file not found!"
             exit 1
           fi
 
-          mkdir -p "$RUNNER_TEMP/zip_check"
+          mkdir -p "$EXTRACT_DIR"
 
-          unzip -oq "$ZIP_FILE" -d "$RUNNER_TEMP/zip_check"
+          unzip -oq "$ZIP_FILE" -d "$EXTRACT_DIR"
 
-          if [ ! -f "$RUNNER_TEMP/zip_check/pubspec.yaml" ]; then
-            echo "ERROR: pubspec.yaml not found at ZIP root!"
+          echo "Searching for pubspec.yaml..."
+
+          PUBSPEC=$(find "$EXTRACT_DIR" \
+            -type f \
+            -name "pubspec.yaml" \
+            -not -path "*/.dart_tool/*" \
+            -print -quit)
+
+          if [ -z "$PUBSPEC" ]; then
+            echo "ERROR: pubspec.yaml not found anywhere in ZIP!"
+            find "$EXTRACT_DIR" -maxdepth 4 -type f | head -100
             exit 1
           fi
 
-          unzip -oq "$ZIP_FILE" -d "$GITHUB_WORKSPACE"
+          PROJECT_DIR=$(dirname "$PUBSPEC")
 
-          test -f "$GITHUB_WORKSPACE/pubspec.yaml"
-          test -d "$GITHUB_WORKSPACE/lib"
-          test -d "$GITHUB_WORKSPACE/android"
+          if [ ! -d "$PROJECT_DIR/lib" ]; then
+            echo "ERROR: lib directory missing!"
+            exit 1
+          fi
 
-          echo "Flutter project extracted successfully."
+          if [ ! -d "$PROJECT_DIR/android" ]; then
+            echo "ERROR: android directory missing!"
+            exit 1
+          fi
+
+          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
+
+          echo "Flutter project found successfully!"
+          echo "Project path: $PROJECT_DIR"
 
       # 4. Setup Flutter
       - name: Setup Flutter
@@ -68,36 +87,37 @@ jobs:
         run: |
           java -version
           flutter --version
-          cd android
+          cd "$PROJECT_DIR/android"
           ./gradlew --version
 
       # 6. Install dependencies
       - name: Flutter Pub Get
+        working-directory: ${{ env.PROJECT_DIR }}
         run: flutter pub get
-        working-directory: ${{ github.workspace }}
 
       # 7. Build APK
       - name: Build Release APK
+        working-directory: ${{ env.PROJECT_DIR }}
         run: flutter build apk --release
-        working-directory: ${{ github.workspace }}
 
       # 8. Verify APK
       - name: Verify APK
         run: |
-          APK="build/app/outputs/flutter-apk/app-release.apk"
+          APK="$PROJECT_DIR/build/app/outputs/flutter-apk/app-release.apk"
 
           if [ ! -f "$APK" ]; then
             echo "ERROR: APK not generated!"
+            find "$PROJECT_DIR/build" -name "*.apk" || true
             exit 1
           fi
 
           ls -lh "$APK"
 
-      # 9. Upload Artifact
+      # 9. Upload APK
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: Flutter-Release-APK
-          path: build/app/outputs/flutter-apk/app-release.apk
+          path: ${{ env.PROJECT_DIR }}/build/app/outputs/flutter-apk/app-release.apk
           if-no-files-found: error
           retention-days: 14
