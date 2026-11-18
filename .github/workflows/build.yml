@@ -22,7 +22,7 @@ jobs:
         uses: actions/checkout@v4
 
       # 2. Setup Java 17
-      - name: Setup Java 17
+      - name: Setup Java
         uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -44,11 +44,7 @@ jobs:
 
           mkdir -p "$EXTRACT_DIR"
 
-          if ! unzip -tq "$ZIP_FILE" > /dev/null; then
-            echo "ERROR: ZIP file is corrupted!"
-            exit 1
-          fi
-
+          unzip -tq "$ZIP_FILE" > /dev/null
           unzip -oq "$ZIP_FILE" -d "$EXTRACT_DIR"
 
           PROJECT_DIR=""
@@ -64,69 +60,88 @@ jobs:
 
           if [ -z "$PROJECT_DIR" ]; then
             echo "ERROR: Flutter project not found!"
-            find "$EXTRACT_DIR" -maxdepth 5 -print
             exit 1
           fi
 
           echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
 
-          echo "Flutter project found: $PROJECT_DIR"
+          echo "Project found: $PROJECT_DIR"
 
-      # 4. Update Gradle Wrapper
-      - name: Upgrade Gradle to 9.3.1
-        shell: bash
-        run: |
-          WRAPPER_FILE="$PROJECT_DIR/android/gradle/wrapper/gradle-wrapper.properties"
-
-          if [ ! -f "$WRAPPER_FILE" ]; then
-            echo "ERROR: gradle-wrapper.properties not found!"
-            exit 1
-          fi
-
-          echo "Old Gradle configuration:"
-          cat "$WRAPPER_FILE"
-
-          sed -i 's#^distributionUrl=.*#distributionUrl=https\\://services.gradle.org/distributions/gradle-9.3.1-bin.zip#' "$WRAPPER_FILE"
-
-          echo "New Gradle configuration:"
-          cat "$WRAPPER_FILE"
-
-          grep -q 'gradle-9.3.1-bin.zip' "$WRAPPER_FILE"
-
-          echo "Gradle successfully updated to 9.3.1"
-
-      # 5. Setup Flutter
+      # 4. Setup Flutter
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
         with:
           channel: stable
           cache: true
 
-      # 6. Configure Java for Flutter
+      # 5. Configure Java
       - name: Configure Flutter Java
         run: |
           flutter config --jdk-dir="$JAVA_HOME"
           java -version
           flutter --version
 
-      # 7. Verify Gradle
-      - name: Verify Gradle
-        working-directory: ${{ env.PROJECT_DIR }}/android
+      # 6. Create missing Gradle Wrapper
+      - name: Fix Gradle Wrapper
+        shell: bash
         run: |
-          chmod +x gradlew
+          ANDROID_DIR="$PROJECT_DIR/android"
+          TEMP_GRADLE="$RUNNER_TEMP/gradle_setup"
+          GRADLE_ZIP="$RUNNER_TEMP/gradle-9.3.1-bin.zip"
+
+          mkdir -p "$TEMP_GRADLE"
+
+          echo "Downloading Gradle 9.3.1..."
+
+          curl -fL --retry 3 \
+            https://services.gradle.org/distributions/gradle-9.3.1-bin.zip \
+            -o "$GRADLE_ZIP"
+
+          unzip -oq "$GRADLE_ZIP" -d "$TEMP_GRADLE"
+
+          GRADLE_BIN="$TEMP_GRADLE/gradle-9.3.1/bin/gradle"
+
+          mkdir -p "$RUNNER_TEMP/wrapper_project"
+
+          cd "$RUNNER_TEMP/wrapper_project"
+
+          echo "rootProject.name = 'wrapper-generator'" > settings.gradle
+          echo " " > build.gradle
+
+          "$GRADLE_BIN" wrapper \
+            --gradle-version 9.3.1 \
+            --distribution-type bin
+
+          mkdir -p "$ANDROID_DIR/gradle/wrapper"
+
+          cp gradlew "$ANDROID_DIR/gradlew"
+          cp gradlew.bat "$ANDROID_DIR/gradlew.bat"
+
+          cp gradle/wrapper/gradle-wrapper.jar \
+            "$ANDROID_DIR/gradle/wrapper/"
+
+          cp gradle/wrapper/gradle-wrapper.properties \
+            "$ANDROID_DIR/gradle/wrapper/"
+
+          chmod +x "$ANDROID_DIR/gradlew"
+
+          echo "Gradle Wrapper created successfully."
+
+          cd "$ANDROID_DIR"
+
           ./gradlew --version
 
-      # 8. Get dependencies
+      # 7. Install Dependencies
       - name: Flutter Pub Get
         working-directory: ${{ env.PROJECT_DIR }}
         run: flutter pub get
 
-      # 9. Build APK
+      # 8. Build APK
       - name: Build Release APK
         working-directory: ${{ env.PROJECT_DIR }}
         run: flutter build apk --release
 
-      # 10. Verify APK
+      # 9. Verify APK
       - name: Verify APK
         working-directory: ${{ env.PROJECT_DIR }}
         run: |
@@ -138,10 +153,10 @@ jobs:
             exit 1
           fi
 
-          echo "APK successfully generated:"
+          echo "APK generated successfully:"
           ls -lh "$APK"
 
-      # 11. Upload APK
+      # 10. Upload APK
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
