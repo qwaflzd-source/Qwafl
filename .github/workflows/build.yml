@@ -22,13 +22,16 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Install unzip
+      - name: Install dependencies
         run: sudo apt-get update -qq && sudo apt-get install -y -qq unzip
 
       - name: Extract Flutter project
         shell: bash
         run: |
+          set -e
+
           mkdir -p "$RUNNER_TEMP/flutter_source"
+
           ZIP_FILE=$(find "$GITHUB_WORKSPACE" -maxdepth 2 -name "Flutter-App-Full-SourceCode.zip" -print -quit)
 
           if [ -z "$ZIP_FILE" ]; then
@@ -116,7 +119,6 @@ jobs:
           ]
 
           agp_updated = False
-          kotlin_updated = False
 
           for file in files:
               if not file.exists():
@@ -124,7 +126,6 @@ jobs:
 
               content = file.read_text()
 
-              # Modern plugins DSL
               content, count = re.subn(
                   r'((?:id\s*\(?\s*["\']com\.android\.(?:application|library)["\']\s*\)?\s*version\s*)["\'])[^"\']+(["\'])',
                   r'\g<1>9.1.1\g<2>',
@@ -132,7 +133,6 @@ jobs:
               )
               agp_updated |= count > 0
 
-              # Legacy buildscript dependency
               content, count = re.subn(
                   r'(com\.android\.tools\.build:gradle:)[0-9.]+',
                   r'\g<1>9.1.1',
@@ -140,39 +140,51 @@ jobs:
               )
               agp_updated |= count > 0
 
-              # Kotlin plugin in plugins DSL
-              content, count = re.subn(
+              content = re.sub(
                   r'((?:id\s*\(?\s*["\']org\.jetbrains\.kotlin\.android["\']\s*\)?\s*version\s*)["\'])[^"\']+(["\'])',
                   r'\g<1>2.2.10\g<2>',
                   content
               )
-              kotlin_updated |= count > 0
 
-              # Legacy Kotlin Gradle Plugin dependency
-              content, count = re.subn(
+              content = re.sub(
                   r'(org\.jetbrains\.kotlin:kotlin-gradle-plugin:)[0-9.]+',
                   r'\g<1>2.2.10',
                   content
               )
-              kotlin_updated |= count > 0
 
               file.write_text(content)
 
           if not agp_updated:
-              print("Could not find an AGP version to update.")
-              print("Android Gradle files:")
-              for file in root.glob("*"):
-                  print(file.name)
-              raise SystemExit(1)
+              raise SystemExit("Could not find Android Gradle Plugin version")
 
           print("Android Gradle Plugin updated to 9.1.1")
-          print("Kotlin plugin updated:", kotlin_updated)
           PY
 
-          echo "Updated Android Gradle files:"
-          grep -R -n -E 'com.android.application|com.android.tools.build:gradle|kotlin-gradle-plugin|org.jetbrains.kotlin.android' \
-            "$PROJECT_DIR/android" \
-            --include="*.gradle" --include="*.gradle.kts" || true
+      - name: Remove obsolete Gradle properties
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import os
+          import re
+          from pathlib import Path
+
+          project = Path(os.environ["PROJECT_DIR"])
+
+          for file in project.rglob("gradle.properties"):
+              content = file.read_text()
+
+              updated = re.sub(
+                  r"(?m)^\s*android\.defaults\.buildfeatures\.buildconfig\s*=.*(?:\r?\n|$)",
+                  "",
+                  content
+              )
+
+              if updated != content:
+                  file.write_text(updated)
+                  print(f"Removed obsolete property from: {file}")
+
+          print("Gradle properties checked")
+          PY
 
       - name: Get Flutter dependencies
         working-directory: ${{ env.PROJECT_DIR }}
