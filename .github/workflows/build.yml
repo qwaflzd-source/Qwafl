@@ -21,14 +21,14 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      # 2. Java 17
+      # 2. Setup Java 17
       - name: Setup Java
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
 
-      # 3. Extract ZIP and locate project
+      # 3. Extract ZIP
       - name: Extract Flutter Source
         shell: bash
         run: |
@@ -37,62 +37,62 @@ jobs:
           ZIP_FILE="$GITHUB_WORKSPACE/Flutter-App-Full-SourceCode.zip"
           EXTRACT_DIR="$RUNNER_TEMP/flutter_source"
 
-          echo "Checking ZIP file..."
-
           if [ ! -f "$ZIP_FILE" ]; then
-            echo "ERROR: ZIP file does not exist!"
+            echo "ERROR: ZIP file not found!"
             exit 1
           fi
-
-          echo "Checking ZIP integrity..."
-
-          if ! unzip -tq "$ZIP_FILE" > /dev/null; then
-            echo "ERROR: ZIP file is invalid or corrupted!"
-            exit 1
-          fi
-
-          echo "Extracting project..."
 
           mkdir -p "$EXTRACT_DIR"
 
-          if ! unzip -oq "$ZIP_FILE" -d "$EXTRACT_DIR"; then
-            echo "ERROR: Extraction failed!"
+          if ! unzip -tq "$ZIP_FILE" > /dev/null; then
+            echo "ERROR: ZIP file is corrupted!"
             exit 1
           fi
 
-          echo "Extraction completed."
+          unzip -oq "$ZIP_FILE" -d "$EXTRACT_DIR"
 
-          # Find pubspec.yaml files
-          find "$EXTRACT_DIR" -type f -name "pubspec.yaml" \
-            -print0 > "$RUNNER_TEMP/pubspec_list"
+          echo "ZIP extracted successfully."
+
+          echo "Searching project files..."
+
+          find "$EXTRACT_DIR" -maxdepth 4 -print
 
           PROJECT_DIR=""
 
           while IFS= read -r -d '' FILE; do
             DIR="$(dirname "$FILE")"
 
-            if [ -d "$DIR/lib" ] && \
-               [ -f "$DIR/android/gradlew" ]; then
+            if [ -d "$DIR/lib" ] && [ -d "$DIR/android" ]; then
               PROJECT_DIR="$DIR"
-              break
+
+              if [ -f "$DIR/android/gradlew" ]; then
+                break
+              fi
             fi
-          done < "$RUNNER_TEMP/pubspec_list"
+          done < <(find "$EXTRACT_DIR" -type f -name "pubspec.yaml" -print0)
 
           if [ -z "$PROJECT_DIR" ]; then
             echo "ERROR: Flutter project not found!"
-            echo "Expected pubspec.yaml, lib and android/gradlew."
-            echo "Extracted directory: $EXTRACT_DIR"
+            echo "Checking extracted files:"
+            find "$EXTRACT_DIR" -maxdepth 6 -print
             exit 1
           fi
 
           echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
 
           echo "================================"
-          echo "Flutter project successfully found"
-          echo "Project: $PROJECT_DIR"
+          echo "PROJECT FOUND:"
+          echo "$PROJECT_DIR"
           echo "================================"
 
           ls -la "$PROJECT_DIR"
+
+          if [ -f "$PROJECT_DIR/android/gradlew" ]; then
+            chmod +x "$PROJECT_DIR/android/gradlew"
+            echo "Gradle wrapper found."
+          else
+            echo "WARNING: Gradle wrapper is missing."
+          fi
 
       # 4. Setup Flutter
       - name: Setup Flutter
@@ -101,25 +101,24 @@ jobs:
           channel: stable
           cache: true
 
-      # 5. Verify environment
+      # 5. Verify Environment
       - name: Verify Environment
-        shell: bash
         run: |
+          echo "Java version:"
           java -version
+
+          echo "Flutter version:"
           flutter --version
 
-          cd "$PROJECT_DIR/android"
+          echo "Project directory:"
+          echo "$PROJECT_DIR"
 
-          chmod +x gradlew
-
-          ./gradlew --version
-
-      # 6. Install dependencies
+      # 6. Install Dependencies
       - name: Flutter Pub Get
         working-directory: ${{ env.PROJECT_DIR }}
         run: flutter pub get
 
-      # 7. Build APK
+      # 7. Build Release APK
       - name: Build Release APK
         working-directory: ${{ env.PROJECT_DIR }}
         run: flutter build apk --release
@@ -132,14 +131,15 @@ jobs:
 
           if [ ! -f "$APK" ]; then
             echo "ERROR: APK not generated!"
+            find build -name "*.apk"
             exit 1
           fi
 
-          echo "APK successfully generated:"
+          echo "APK generated successfully!"
           ls -lh "$APK"
 
       # 9. Upload APK
-      - name: Upload APK Artifact
+      - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: Flutter-Release-APK
