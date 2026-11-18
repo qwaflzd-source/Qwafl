@@ -58,10 +58,7 @@ jobs:
 
             if [ -d "$DIR/lib" ] && [ -d "$DIR/android" ]; then
               PROJECT_DIR="$DIR"
-
-              if [ -f "$DIR/android/gradlew" ]; then
-                break
-              fi
+              break
             fi
           done < <(find "$EXTRACT_DIR" -type f -name "pubspec.yaml" -print0)
 
@@ -73,50 +70,63 @@ jobs:
 
           echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
 
-          echo "Project found: $PROJECT_DIR"
+          echo "Flutter project found: $PROJECT_DIR"
 
-      # 4. Setup Flutter
+      # 4. Update Gradle Wrapper
+      - name: Upgrade Gradle to 9.3.1
+        shell: bash
+        run: |
+          WRAPPER_FILE="$PROJECT_DIR/android/gradle/wrapper/gradle-wrapper.properties"
+
+          if [ ! -f "$WRAPPER_FILE" ]; then
+            echo "ERROR: gradle-wrapper.properties not found!"
+            exit 1
+          fi
+
+          echo "Old Gradle configuration:"
+          cat "$WRAPPER_FILE"
+
+          sed -i 's#^distributionUrl=.*#distributionUrl=https\\://services.gradle.org/distributions/gradle-9.3.1-bin.zip#' "$WRAPPER_FILE"
+
+          echo "New Gradle configuration:"
+          cat "$WRAPPER_FILE"
+
+          grep -q 'gradle-9.3.1-bin.zip' "$WRAPPER_FILE"
+
+          echo "Gradle successfully updated to 9.3.1"
+
+      # 5. Setup Flutter
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
         with:
           channel: stable
           cache: true
 
-      # 5. Force Flutter to use Java 17
+      # 6. Configure Java for Flutter
       - name: Configure Flutter Java
         run: |
           flutter config --jdk-dir="$JAVA_HOME"
-
-          echo "JAVA_HOME=$JAVA_HOME"
           java -version
+          flutter --version
 
-          flutter doctor -v
-
-      # 6. Verify Gradle version
-      - name: Verify Gradle Configuration
+      # 7. Verify Gradle
+      - name: Verify Gradle
         working-directory: ${{ env.PROJECT_DIR }}/android
         run: |
-          echo "Gradle wrapper properties:"
-          cat gradle/wrapper/gradle-wrapper.properties
+          chmod +x gradlew
+          ./gradlew --version
 
-          if [ -f gradlew ]; then
-            chmod +x gradlew
-            ./gradlew --version
-          else
-            echo "WARNING: Gradle wrapper not found."
-          fi
-
-      # 7. Install dependencies
+      # 8. Get dependencies
       - name: Flutter Pub Get
         working-directory: ${{ env.PROJECT_DIR }}
         run: flutter pub get
 
-      # 8. Build Release APK
+      # 9. Build APK
       - name: Build Release APK
         working-directory: ${{ env.PROJECT_DIR }}
         run: flutter build apk --release
 
-      # 9. Verify APK
+      # 10. Verify APK
       - name: Verify APK
         working-directory: ${{ env.PROJECT_DIR }}
         run: |
@@ -128,10 +138,10 @@ jobs:
             exit 1
           fi
 
-          echo "APK generated successfully:"
+          echo "APK successfully generated:"
           ls -lh "$APK"
 
-      # 10. Upload APK
+      # 11. Upload APK
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
