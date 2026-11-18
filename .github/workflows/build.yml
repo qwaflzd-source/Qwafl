@@ -187,10 +187,40 @@ jobs:
               file.write_text(content)
 
           properties = project / "android" / "gradle.properties"
+
           with properties.open("a") as f:
               f.write("\nandroid.r8.optimizedResourceShrinking=false\n")
 
           print("Gradle properties configured")
+          PY
+
+      - name: Update Android compileSdk
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import os
+          import re
+          from pathlib import Path
+
+          root = Path(os.environ["PROJECT_DIR"]) / "android"
+
+          patterns = [
+              (r'compileSdkVersion\s+\d+', 'compileSdkVersion 35'),
+              (r'compileSdk\s+\d+', 'compileSdk 35'),
+              (r'compileSdk\s*=\s*\d+', 'compileSdk = 35'),
+              (r'compileSdkVersion\s*=\s*\d+', 'compileSdkVersion = 35'),
+          ]
+
+          for file in list(root.rglob("*.gradle")) + list(root.rglob("*.gradle.kts")):
+              content = file.read_text()
+              updated = content
+
+              for pattern, replacement in patterns:
+                  updated = re.sub(pattern, replacement, updated)
+
+              if updated != content:
+                  file.write_text(updated)
+                  print(f"Updated compileSdk in {file}")
           PY
 
       - name: Upgrade page_transition
