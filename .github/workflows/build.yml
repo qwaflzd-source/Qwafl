@@ -29,7 +29,6 @@ jobs:
         shell: bash
         run: |
           set -e
-
           mkdir -p "$RUNNER_TEMP/flutter_source"
 
           ZIP_FILE=$(find "$GITHUB_WORKSPACE" -maxdepth 2 -name "Flutter-App-Full-SourceCode.zip" -print -quit)
@@ -181,14 +180,40 @@ jobs:
 
               if updated != content:
                   file.write_text(updated)
-                  print(f"Removed obsolete property from: {file}")
-
-          print("Gradle properties checked")
+                  print(f"Updated: {file}")
           PY
 
       - name: Get Flutter dependencies
         working-directory: ${{ env.PROJECT_DIR }}
         run: flutter pub get
+
+      - name: Fix InAppWebView ProGuard setting
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          cache = Path.home() / ".pub-cache" / "hosted" / "pub.dev"
+
+          files = list(cache.glob(
+              "flutter_inappwebview_android-*/android/build.gradle"
+          ))
+
+          if not files:
+              raise SystemExit("flutter_inappwebview_android build.gradle not found")
+
+          for file in files:
+              content = file.read_text()
+
+              old = "proguard-android.txt"
+              new = "proguard-android-optimize.txt"
+
+              if old in content:
+                  file.write_text(content.replace(old, new))
+                  print(f"Fixed ProGuard setting in {file}")
+              else:
+                  print(f"No old ProGuard setting found in {file}")
+          PY
 
       - name: Build Release APK
         working-directory: ${{ env.PROJECT_DIR }}
