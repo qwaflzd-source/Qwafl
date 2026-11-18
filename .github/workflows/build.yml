@@ -86,6 +86,7 @@ jobs:
         shell: bash
         run: |
           set -e
+
           cd "$RUNNER_TEMP"
 
           wget -q https://services.gradle.org/distributions/gradle-9.3.1-bin.zip
@@ -119,59 +120,48 @@ jobs:
 
           root = Path(os.environ['PROJECT_DIR']) / 'android'
 
-          extensions = {'.gradle', '.kts', '.toml'}
-
           for file in root.rglob('*'):
-              if not file.is_file() or file.suffix not in extensions:
+              if not file.is_file() or file.suffix not in {'.gradle', '.kts', '.toml'}:
                   continue
 
               text = file.read_text()
               original = text
 
-              # Android Gradle Plugin versions in plugins blocks.
               text = re.sub(
                   r'(com\.android\.(?:application|library)\s*["\']?\s*version\s*["\']?)[0-9.]+',
-                  r'\g<1>9.1.1',
-                  text
+                  r'\g<1>9.1.1', text
               )
 
-              # Older buildscript classpath format.
               text = re.sub(
                   r'(com\.android\.tools\.build:gradle:)[0-9.]+',
-                  r'\g<1>9.1.1',
-                  text
+                  r'\g<1>9.1.1', text
               )
 
-              # Version catalog AGP entries.
               text = re.sub(
                   r'(\bagp\s*=\s*["\'])[0-9.]+(["\'])',
-                  r'\g<1>9.1.1\2',
-                  text
+                  r'\g<1>9.1.1\2', text
               )
 
-              # Kotlin plugin versions.
               text = re.sub(
                   r'(org\.jetbrains\.kotlin\.android\s*["\']?\s*version\s*["\']?)[0-9.]+',
-                  r'\g<1>2.2.10',
-                  text
+                  r'\g<1>2.2.10', text
               )
 
               text = re.sub(
                   r'(org\.jetbrains\.kotlin:kotlin-gradle-plugin:)[0-9.]+',
-                  r'\g<1>2.2.10',
-                  text
+                  r'\g<1>2.2.10', text
               )
 
               if text != original:
                   file.write_text(text)
                   print("Updated:", file)
-
           PY
 
       - name: Update Flutter dependencies
         working-directory: ${{ env.PROJECT_DIR }}
         run: |
           flutter pub add page_transition:^2.2.2
+          flutter pub add flutter_downloader:^1.12.1
           flutter pub get
 
       - name: Set compileSdk 36 in all Android modules
@@ -185,6 +175,7 @@ jobs:
           import re
 
           project = Path(os.environ['PROJECT_DIR'])
+
           roots = [
               project / 'android',
               Path.home() / '.pub-cache' / 'hosted' / 'pub.dev'
@@ -210,32 +201,30 @@ jobs:
 
                   original = text
 
-                  if file.suffix == '.kts':
-                      replacement = 'compileSdk = 36'
-                  else:
-                      replacement = 'compileSdkVersion 36'
+                  replacement = (
+                      'compileSdk = 36'
+                      if file.suffix == '.kts'
+                      else 'compileSdkVersion 36'
+                  )
 
                   pattern = (
                       r'^(\s*)compileSdk(?:Version)?'
                       r'\s*(?:=\s*)?.*$'
                   )
 
-                  text, count = re.subn(
+                  text = re.sub(
                       pattern,
                       lambda m: m.group(1) + replacement,
                       text,
                       flags=re.MULTILINE
                   )
 
-                  if count:
+                  if text != original:
                       file.write_text(text)
                       changed += 1
-                      print("Updated compileSdk:", file)
+                      print("Updated:", file)
 
           print(f"Updated {changed} Gradle files.")
-
-          if changed == 0:
-              raise SystemExit("No compileSdk declarations were updated.")
           PY
 
       - name: Fix Gradle properties
@@ -280,23 +269,11 @@ jobs:
               "$file"
           done
 
-      - name: Verify Android configuration
-        shell: bash
+      - name: Verify downloader version
+        working-directory: ${{ env.PROJECT_DIR }}
         run: |
-          echo "Checking remaining old compileSdk declarations:"
-          grep -R -nE 'compileSdk(Version)?[[:space:]]+33' \
-            "$PROJECT_DIR/android" \
-            "$HOME/.pub-cache/hosted/pub.dev" \
-            --include='build.gradle' \
-            --include='build.gradle.kts' || true
-
-          echo "Checking AGP references:"
-          grep -R -nE 'com.android.application.*version|com.android.tools.build:gradle:' \
-            "$PROJECT_DIR/android" \
-            --include='settings.gradle' \
-            --include='settings.gradle.kts' \
-            --include='build.gradle' \
-            --include='build.gradle.kts' || true
+          grep -A 2 "flutter_downloader:" pubspec.yaml
+          flutter pub deps | grep flutter_downloader
 
       - name: Build Release APK
         working-directory: ${{ env.PROJECT_DIR }}
