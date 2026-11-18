@@ -31,7 +31,6 @@ jobs:
         shell: bash
         run: |
           set -e
-
           mkdir -p "$RUNNER_TEMP/flutter_source"
 
           ZIP_FILE=$(find "$GITHUB_WORKSPACE" -maxdepth 2 -name "Flutter-App-Full-SourceCode.zip" -print -quit)
@@ -64,16 +63,14 @@ jobs:
           channel: stable
           cache: true
 
-      - name: Configure Java for Flutter
+      - name: Configure Java
         run: |
           flutter config --jdk-dir="$JAVA_HOME"
           flutter --version
           java -version
 
       - name: Install Android SDK 36
-        shell: bash
         run: |
-          set -e
           yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses || true
           "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" \
             "platforms;android-36" \
@@ -83,7 +80,6 @@ jobs:
         shell: bash
         run: |
           set -e
-
           cd "$RUNNER_TEMP"
 
           wget -q https://services.gradle.org/distributions/gradle-9.3.1-bin.zip
@@ -104,9 +100,6 @@ jobs:
 
           chmod +x "$PROJECT_DIR/android/gradlew"
 
-          cd "$PROJECT_DIR/android"
-          ./gradlew --version
-
       - name: Update Android Gradle and Kotlin versions
         shell: bash
         run: |
@@ -114,23 +107,27 @@ jobs:
 
           python3 <<'PY'
           from pathlib import Path
+          import os
           import re
 
-          root = Path(__import__('os').environ['PROJECT_DIR']) / 'android'
+          root = Path(os.environ['PROJECT_DIR']) / 'android'
 
-          files = list(root.rglob('*.gradle')) + list(root.rglob('*.gradle.kts'))
+          files = []
+          for name in [
+              'settings.gradle',
+              'settings.gradle.kts',
+              'build.gradle',
+              'build.gradle.kts'
+          ]:
+              p = root / name
+              if p.exists():
+                  files.append(p)
 
           for file in files:
               text = file.read_text()
 
               text = re.sub(
-                  r'(com\.android\.application["\']?\s*version\s*["\']?)[0-9.]+',
-                  r'\g<1>9.1.1',
-                  text
-              )
-
-              text = re.sub(
-                  r'(com\.android\.library["\']?\s*version\s*["\']?)[0-9.]+',
+                  r'(com\.android\.(?:application|library)\s+version\s+["\']?)[0-9.]+',
                   r'\g<1>9.1.1',
                   text
               )
@@ -142,7 +139,7 @@ jobs:
               )
 
               text = re.sub(
-                  r'(org\.jetbrains\.kotlin\.android["\']?\s*version\s*["\']?)[0-9.]+',
+                  r'(org\.jetbrains\.kotlin\.android\s+version\s+["\']?)[0-9.]+',
                   r'\g<1>2.2.10',
                   text
               )
@@ -155,40 +152,71 @@ jobs:
 
               file.write_text(text)
 
-          print("Gradle and Kotlin versions updated.")
+          print("Gradle plugin versions updated.")
           PY
 
-      - name: Fix Gradle properties and compileSdk
+      - name: Set compileSdk 36 safely
         shell: bash
         run: |
           set -e
 
           python3 <<'PY'
           from pathlib import Path
+          import os
           import re
+
+          app = Path(os.environ['PROJECT_DIR']) / 'android/app/build.gradle'
+          if not app.exists():
+              app = Path(os.environ['PROJECT_DIR']) / 'android/app/build.gradle.kts'
+
+          if not app.exists():
+              raise SystemExit("App Gradle file not found")
+
+          text = app.read_text()
+
+          patterns = [
+              r'^(\s*)compileSdkVersion\s+.*$',
+              r'^(\s*)compileSdk\s*=\s*.*$',
+              r'^(\s*)compileSdk\s+.*$',
+          ]
+
+          for pattern in patterns:
+              updated, count = re.subn(
+                  pattern,
+                  lambda m: m.group(1) + (
+                      'compileSdk = 36'
+                      if app.suffix == '.kts'
+                      else 'compileSdkVersion 36'
+                  ),
+                  text,
+                  count=1,
+                  flags=re.MULTILINE
+              )
+              if count:
+                  text = updated
+                  break
+          else:
+              raise SystemExit("Could not find compileSdk declaration in app Gradle file")
+
+          app.write_text(text)
+
+          print("Updated app compileSdk to 36:")
+          for line in text.splitlines():
+              if 'compileSdk' in line:
+                  print(line)
+          PY
+
+      - name: Fix Gradle properties
+        shell: bash
+        run: |
+          set -e
+
+          python3 <<'PY'
+          from pathlib import Path
           import os
 
           root = Path(os.environ['PROJECT_DIR']) / 'android'
 
-          # Update compileSdk to 36 in all Android Gradle files.
-          files = list(root.rglob('*.gradle')) + list(root.rglob('*.gradle.kts'))
-
-          for file in files:
-              text = file.read_text()
-
-              replacements = [
-                  (r'compileSdkVersion\s*=\s*[^\s;]+', 'compileSdkVersion = 36'),
-                  (r'compileSdkVersion\s+[^\s;]+', 'compileSdkVersion 36'),
-                  (r'compileSdk\s*=\s*[^\s;]+', 'compileSdk = 36'),
-                  (r'compileSdk\s+[^\s;]+', 'compileSdk 36'),
-              ]
-
-              for pattern, replacement in replacements:
-                  text = re.sub(pattern, replacement, text)
-
-              file.write_text(text)
-
-          # Remove obsolete Gradle properties.
           for file in root.rglob('gradle.properties'):
               lines = file.read_text().splitlines()
 
@@ -203,13 +231,10 @@ jobs:
               ]
 
               lines.append('android.r8.optimizedResourceShrinking=false')
-
               file.write_text('\n'.join(lines) + '\n')
-
-          print("compileSdk updated to 36.")
           PY
 
-      - name: Update page_transition dependency
+      - name: Update page_transition
         working-directory: ${{ env.PROJECT_DIR }}
         run: |
           flutter pub add page_transition:^2.2.2
@@ -219,7 +244,7 @@ jobs:
         run: |
           flutter pub get
 
-      - name: Fix InAppWebView ProGuard compatibility
+      - name: Fix InAppWebView ProGuard
         shell: bash
         run: |
           set -e
@@ -250,7 +275,7 @@ jobs:
 
           ls -lh "$APK"
 
-      - name: Upload APK Artifact
+      - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: Flutter-Release-APK
