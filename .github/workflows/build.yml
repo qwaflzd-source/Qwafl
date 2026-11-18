@@ -159,7 +159,7 @@ jobs:
           print("Android Gradle Plugin updated to 9.1.1")
           PY
 
-      - name: Remove obsolete Gradle properties
+      - name: Configure Gradle properties
         shell: bash
         run: |
           python3 - <<'PY'
@@ -172,15 +172,25 @@ jobs:
           for file in project.rglob("gradle.properties"):
               content = file.read_text()
 
-              updated = re.sub(
+              content = re.sub(
                   r"(?m)^\s*android\.defaults\.buildfeatures\.buildconfig\s*=.*(?:\r?\n|$)",
                   "",
                   content
               )
 
-              if updated != content:
-                  file.write_text(updated)
-                  print(f"Updated: {file}")
+              content = re.sub(
+                  r"(?m)^\s*android\.r8\.optimizedResourceShrinking\s*=.*(?:\r?\n|$)",
+                  "",
+                  content
+              )
+
+              file.write_text(content)
+
+          properties = project / "android" / "gradle.properties"
+          with properties.open("a") as f:
+              f.write("\nandroid.r8.optimizedResourceShrinking=false\n")
+
+          print("Gradle properties configured")
           PY
 
       - name: Upgrade page_transition
@@ -205,12 +215,12 @@ jobs:
 
           for file in files:
               content = file.read_text()
-              old = "proguard-android.txt"
-              new = "proguard-android-optimize.txt"
-
-              if old in content:
-                  file.write_text(content.replace(old, new))
-                  print(f"Fixed: {file}")
+              content = content.replace(
+                  "proguard-android.txt",
+                  "proguard-android-optimize.txt"
+              )
+              file.write_text(content)
+              print(f"Checked: {file}")
           PY
 
       - name: Build Release APK
