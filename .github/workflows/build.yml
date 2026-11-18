@@ -1,167 +1,101 @@
 
-name: Build Qawafil Flutter APK
+name: Build Qawafil APK
 
 on:
   workflow_dispatch:
   push:
     branches:
       - main
+      - master
 
 permissions:
   contents: read
 
 jobs:
   build:
+    name: Build Flutter APK
     runs-on: ubuntu-latest
+    timeout-minutes: 60
 
     steps:
+      # 1. Download repository
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Setup Java 17
+      # 2. Java 17
+      - name: Set up Java 17
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
 
-      - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
-
-      - name: Setup Gradle 8.11.1
-        uses: gradle/actions/setup-gradle@v4
+      # 3. Android SDK
+      # Do not add the deprecated "tools" package.
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v4
         with:
-          gradle-version: '8.11.1'
+          packages: 'platform-tools'
+          accept-android-sdk-licenses: true
 
-      - name: Setup Flutter 3.35.4
+      - name: Install Android SDK components
+        run: |
+          sdkmanager --install \
+            "platforms;android-36" \
+            "build-tools;36.0.0" \
+            "platform-tools"
+
+      # 4. Flutter 3.35.4 (project version)
+      - name: Set up Flutter
         uses: subosito/flutter-action@v2
         with:
           flutter-version: '3.35.4'
           channel: stable
           cache: true
 
-      - name: Install Android SDK components
+      - name: Verify toolchain
+        run: |
+          java -version
+          flutter --version
+          dart --version
+          sdkmanager --version
+
+      # 5. Extract the source ZIP
+      - name: Extract Flutter source
         shell: bash
         run: |
           set -euo pipefail
 
-          yes | sdkmanager --licenses >/dev/null || true
-
-          sdkmanager \
-            "platform-tools" \
-            "platforms;android-36" \
-            "build-tools;36.0.0"
-
-      - name: Extract Flutter project
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          ZIP_FILE=$(find "$GITHUB_WORKSPACE" \
+          ZIP_FILE="$(find "$GITHUB_WORKSPACE" \
             -maxdepth 3 \
             -type f \
-            -name "Flutter-App-Full-SourceCode.zip" \
-            | head -n 1)
+            -name 'Flutter-App-Full-SourceCode.zip' \
+            -print -quit)"
 
           if [ -z "$ZIP_FILE" ]; then
-            echo "::error::Flutter-App-Full-SourceCode.zip not found."
+            echo "::error::Flutter-App-Full-SourceCode.zip was not found."
             exit 1
           fi
 
           mkdir -p "$RUNNER_TEMP/flutter_source"
 
-          unzip -q "$ZIP_FILE" -d "$RUNNER_TEMP/flutter_source"
+          unzip -q "$ZIP_FILE" \
+            -d "$RUNNER_TEMP/flutter_source" \
+            -x '*/.cxx/*' \
+               '*/.dart_tool/*' \
+               '*/build/*' \
+               '*/.gradle/*'
 
-          PROJECT_DIR=$(find "$RUNNER_TEMP/flutter_source" \
-            -type f \
-            -name pubspec.yaml \
-            -not -path '*/.dart_tool/*' \
-            -not -path '*/build/*' \
-            -printf '%h\n' | head -n 1)
+          PROJECT_DIR="$RUNNER_TEMP/flutter_source/Flutter-App-Full-SourceCode"
 
-          if [ -z "$PROJECT_DIR" ]; then
-            echo "::error::Flutter project not found."
-            exit 1
-          fi
-
-          if [ ! -d "$PROJECT_DIR/android" ] || [ ! -d "$PROJECT_DIR/lib" ]; then
-            echo "::error::Incomplete Flutter project."
+          if [ ! -f "$PROJECT_DIR/pubspec.yaml" ]; then
+            echo "::error::pubspec.yaml was not found in the extracted project."
             exit 1
           fi
 
           echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
 
-          echo "Project located: $PROJECT_DIR"
-
-      - name: Configure Android Gradle versions
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          cd "$PROJECT_DIR/android"
-
-          python3 - <<'PY'
-          from pathlib import Path
-          import re
-
-          settings = Path("settings.gradle")
-
-          if not settings.exists():
-              raise SystemExit("settings.gradle is missing.")
-
-          text = settings.read_text()
-
-          text, count = re.subn(
-              r'(id\s+["\']com\.android\.application["\']\s+version\s+["\'])[^"\']+',
-              r'\g<1>8.10.1',
-              text,
-              count=1
-          )
-
-          if count != 1:
-              raise SystemExit("Could not update Android Gradle Plugin version.")
-
-          settings.write_text(text)
-
-          wrapper = Path("gradle/wrapper")
-          wrapper.mkdir(parents=True, exist_ok=True)
-
-          properties = wrapper / "gradle-wrapper.properties"
-
-          properties.write_text(
-              "distributionBase=GRADLE_USER_HOME\n"
-              "distributionPath=wrapper/dists\n"
-              "zipStoreBase=GRADLE_USER_HOME\n"
-              "zipStorePath=wrapper/dists\n"
-              "distributionUrl=https\\://services.gradle.org/distributions/gradle-8.11.1-all.zip\n"
-          )
-
-          print("AGP: 8.10.1")
-          print("Gradle: 8.11.1")
-          PY
-
-      - name: Create Gradle wrapper
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          mkdir -p "$RUNNER_TEMP/gradle-wrapper"
-          cd "$RUNNER_TEMP/gradle-wrapper"
-
-          gradle wrapper \
-            --gradle-version 8.11.1 \
-            --distribution-type all
-
-          cp gradlew "$PROJECT_DIR/android/gradlew"
-
-          cp -R gradle "$PROJECT_DIR/android/"
-
-          chmod +x "$PROJECT_DIR/android/gradlew"
-
-          cd "$PROJECT_DIR/android"
-
-          ./gradlew --version
-
-      - name: Match Firebase and Android package automatically
+      # 6. Align Android package with Firebase configuration
+      - name: Configure Android package and MainActivity
         shell: bash
         run: |
           set -euo pipefail
@@ -170,22 +104,23 @@ jobs:
 
           python3 - <<'PY'
           import json
+          import os
           import re
           from pathlib import Path
 
-          firebase = Path("android/app/google-services.json")
-          gradle = Path("android/app/build.gradle")
+          root = Path.cwd()
+          gradle_file = root / "android/app/build.gradle"
+          firebase_file = root / "android/app/google-services.json"
 
-          if not firebase.exists():
-              raise SystemExit("google-services.json is missing.")
+          if not gradle_file.is_file():
+              raise SystemExit("android/app/build.gradle is missing")
 
-          if not gradle.exists():
-              raise SystemExit("android/app/build.gradle is missing.")
+          if not firebase_file.is_file():
+              raise SystemExit("android/app/google-services.json is missing")
 
-          data = json.loads(firebase.read_text())
+          data = json.loads(firebase_file.read_text(encoding="utf-8"))
 
           clients = data.get("client", [])
-
           packages = []
 
           for client in clients:
@@ -194,199 +129,234 @@ jobs:
                   .get("android_client_info", {})
                   .get("package_name")
               )
-
-              if package and package not in packages:
+              if package:
                   packages.append(package)
 
           if not packages:
               raise SystemExit(
-                  "No Android package found in Firebase configuration."
+                  "No Android package_name was found in google-services.json"
               )
 
-          source = gradle.read_text()
-
-          app_match = re.search(
-              r'applicationId\s*=\s*["\']([^"\']+)["\']',
-              source
+          # Keep the custom package if Firebase already has it.
+          # Otherwise use the first package registered in Firebase.
+          package = (
+              "com.qwafily.app"
+              if "com.qwafily.app" in packages
+              else packages[0]
           )
 
-          namespace_match = re.search(
-              r'namespace\s*=\s*["\']([^"\']+)["\']',
-              source
-          )
+          if not re.fullmatch(
+              r"[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)+",
+              package
+          ):
+              raise SystemExit(f"Invalid Android package name: {package}")
 
-          old_id = app_match.group(1) if app_match else None
+          text = gradle_file.read_text(encoding="utf-8")
 
-          if old_id in packages:
-              selected = old_id
-          else:
-              selected = packages[0]
-
-          if not app_match:
-              raise SystemExit("applicationId declaration not found.")
-
-          if not namespace_match:
-              raise SystemExit("namespace declaration not found.")
-
-          source = re.sub(
-              r'(applicationId\s*=\s*)["\'][^"\']+["\']',
-              lambda m: m.group(1) + '"' + selected + '"',
-              source,
+          text, namespace_count = re.subn(
+              r'(?m)^(\s*namespace\s*=\s*)["\'][^"\']+["\']',
+              lambda m: m.group(1) + f'"{package}"',
+              text,
               count=1
           )
 
-          source = re.sub(
-              r'(namespace\s*=\s*)["\'][^"\']+["\']',
-              lambda m: m.group(1) + '"' + selected + '"',
-              source,
+          text, appid_count = re.subn(
+              r'(?m)^(\s*applicationId\s*=\s*)["\'][^"\']+["\']',
+              lambda m: m.group(1) + f'"{package}"',
+              text,
               count=1
           )
 
-          gradle.write_text(source)
+          if namespace_count != 1:
+              raise SystemExit("Could not safely update Android namespace")
 
-          print("Previous applicationId:", old_id)
-          print("Firebase package IDs:", packages)
-          print("Selected applicationId:", selected)
-          print("Selected namespace:", selected)
+          if appid_count != 1:
+              raise SystemExit("Could not safely update applicationId")
 
-          package_path = Path(*selected.split("."))
+          gradle_file.write_text(text, encoding="utf-8")
 
-          target = (
-              Path("android/app/src/main/kotlin")
-              / package_path
+          # Remove old MainActivity files to prevent duplicate classes.
+          source_dir = root / "android/app/src/main"
+
+          for path in source_dir.rglob("*"):
+              if path.is_file() and path.name in (
+                  "MainActivity.kt",
+                  "MainActivity.java"
+              ):
+                  path.unlink()
+
+          # Recreate MainActivity in the correct namespace path.
+          package_path = package.replace(".", "/")
+          activity_dir = (
+              root / "android/app/src/main/kotlin" / package_path
+          )
+          activity_dir.mkdir(parents=True, exist_ok=True)
+
+          activity_file = activity_dir / "MainActivity.kt"
+          activity_file.write_text(
+              f"""package {package}
+
+          import io.flutter.embedding.android.FlutterActivity
+
+          class MainActivity : FlutterActivity()
+          """,
+              encoding="utf-8"
           )
 
-          target.mkdir(parents=True, exist_ok=True)
-
-          source_dirs = [
-              Path("android/app/src/main/kotlin"),
-              Path("android/app/src/main/java")
-          ]
-
-          for source_dir in source_dirs:
-              if source_dir.exists():
-                  for old_file in source_dir.rglob("MainActivity.kt"):
-                      old_file.unlink()
-
-                  for old_file in source_dir.rglob("MainActivity.java"):
-                      old_file.unlink()
-
-          main_activity = target / "MainActivity.kt"
-
-          main_activity.write_text(
-              f"package {selected}\n\n"
-              "import io.flutter.embedding.android.FlutterActivity\n\n"
-              "class MainActivity : FlutterActivity()\n"
-          )
-
-          print("MainActivity configured:", main_activity)
+          print(f"Android namespace: {package}")
+          print(f"Android applicationId: {package}")
+          print(f"MainActivity: {activity_file}")
           PY
 
-      - name: Update incompatible dependencies
+      # 7. Configure compatible Android Gradle Plugin
+      - name: Configure Android Gradle Plugin
         shell: bash
         run: |
           set -euo pipefail
 
           cd "$PROJECT_DIR"
 
-          flutter pub add flutter_downloader:^1.12.1
-
-          flutter pub get
-
-      - name: Fix Android plugin compatibility
-        shell: bash
-        run: |
-          set -euo pipefail
-
           python3 - <<'PY'
+          import re
           from pathlib import Path
 
-          root = Path.home() / ".pub-cache/hosted/pub.dev"
+          settings = Path("android/settings.gradle")
 
-          if not root.exists():
-              print("Pub cache not found; skipping compatibility patch.")
-              raise SystemExit(0)
+          if not settings.is_file():
+              raise SystemExit("android/settings.gradle is missing")
 
-          for path in root.rglob("*.gradle"):
-              try:
-                  text = path.read_text()
-              except Exception:
-                  continue
+          text = settings.read_text(encoding="utf-8")
 
-              updated = text.replace(
-                  "proguard-android.txt",
-                  "proguard-android-optimize.txt"
-              )
-
-              if updated != text:
-                  path.write_text(updated)
-
-          print("ProGuard compatibility patch completed.")
-          PY
-
-      - name: Verify final Android configuration
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          cd "$PROJECT_DIR/android"
-
-          echo "===== Android app configuration ====="
-
-          grep -nE 'namespace|applicationId|compileSdk|targetSdk' \
-            app/build.gradle
-
-          echo "===== MainActivity ====="
-
-          find app/src/main -name MainActivity.kt -print
-
-          echo "===== Firebase package ====="
-
-          python3 - <<'PY'
-          import json
-          from pathlib import Path
-
-          data = json.loads(
-              Path("app/google-services.json").read_text()
+          pattern = (
+              r'(id\s+["\']com\.android\.application["\']'
+              r'\s+version\s+["\'])[^"\']+(["\'])'
           )
 
-          for client in data.get("client", []):
-              print(
-                  client.get("client_info", {})
-                  .get("android_client_info", {})
-                  .get("package_name")
+          updated, count = re.subn(
+              pattern,
+              r'\g<1>8.10.1\g<2>',
+              text,
+              count=1
+          )
+
+          if count != 1:
+              raise SystemExit(
+                  "Could not find Android application plugin version "
+                  "in settings.gradle"
               )
+
+          settings.write_text(updated, encoding="utf-8")
+          print("Android Gradle Plugin set to 8.10.1")
           PY
 
-      - name: Flutter diagnostics
+      # 8. Set up Gradle 8.11.1
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.11.1'
+
+      # 9. Generate missing Gradle wrapper
+      - name: Generate Gradle wrapper
         shell: bash
         run: |
           set -euo pipefail
 
           cd "$PROJECT_DIR"
 
-          flutter --version
-          flutter doctor -v
-          flutter pub get
+          FLUTTER_BIN="$(readlink -f "$(command -v flutter)")"
+          FLUTTER_ROOT="$(dirname "$(dirname "$FLUTTER_BIN")")"
 
-      - name: Build Debug APK
+          mkdir -p android
+
+          {
+            echo "sdk.dir=$ANDROID_HOME"
+            echo "flutter.sdk=$FLUTTER_ROOT"
+          } > android/local.properties
+
+          cd android
+
+          gradle wrapper \
+            --gradle-version 8.11.1 \
+            --distribution-type all
+
+          chmod +x gradlew
+
+          ./gradlew --version
+
+          test -f gradle/wrapper/gradle-wrapper.jar
+          test -f gradlew
+
+      # 10. Update downloader dependency
+      - name: Resolve Flutter dependencies
         shell: bash
         run: |
           set -euo pipefail
 
+          cd "$PROJECT_DIR"
+
+          flutter pub add "flutter_downloader:^1.12.1"
+          flutter pub get
+
+      # 11. Fix obsolete ProGuard reference in InAppWebView
+      - name: Fix InAppWebView ProGuard configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          PUB_CACHE="${PUB_CACHE:-$HOME/.pub-cache}"
+
+          find "$PUB_CACHE" \
+            -type f \
+            -path '*flutter_inappwebview_android*' \
+            -name '*.gradle' \
+            -print0 |
+          while IFS= read -r -d '' file; do
+            sed -i \
+              's/proguard-android\.txt/proguard-android-optimize.txt/g' \
+              "$file"
+          done
+
+      # 12. Clean stale generated files
+      - name: Clean Flutter project
+        run: |
+          set -euo pipefail
           cd "$PROJECT_DIR"
 
           flutter clean
           flutter pub get
 
-          flutter build apk \
-            --debug \
-            --verbose
+      # 13. Build debug APK
+      - name: Build APK
+        shell: bash
+        run: |
+          set -euo pipefail
 
-      - name: Upload Debug APK
+          cd "$PROJECT_DIR"
+
+          ./android/gradlew \
+            -p android \
+            --no-daemon \
+            --stacktrace \
+            --max-workers=2 \
+            assembleDebug
+
+          APK="build/app/outputs/flutter-apk/app-debug.apk"
+
+          if [ ! -f "$APK" ]; then
+            echo "::error::APK output was not generated."
+            exit 1
+          fi
+
+          mkdir -p "$RUNNER_TEMP/qawafil_output"
+          cp "$APK" "$RUNNER_TEMP/qawafil_output/Qawafil-Debug.apk"
+
+          ls -lh "$RUNNER_TEMP/qawafil_output/Qawafil-Debug.apk"
+
+      # 14. Upload APK
+      - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: Qawafil-Debug-APK
-          path: ${{ env.PROJECT_DIR }}/build/app/outputs/flutter-apk/app-debug.apk
+          path: ${{ runner.temp }}/qawafil_output/Qawafil-Debug.apk
           if-no-files-found: error
-          retention-days: 7
+          retention-days: 14
