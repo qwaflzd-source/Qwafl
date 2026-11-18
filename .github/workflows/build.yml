@@ -6,161 +6,197 @@ on:
   push:
     branches:
       - main
-
-permissions:
-  contents: read
+      - master
 
 jobs:
   build:
-    name: Build Flutter Release APK
     runs-on: ubuntu-latest
 
     steps:
-
-      # 1. Checkout
-      - name: Checkout Repository
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      # 2. Setup Java 17
-      - name: Setup Java
+      - name: Set up Java 17
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
 
-      # 3. Extract ZIP
-      - name: Extract Flutter Source
+      - name: Install unzip
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq unzip
+
+      - name: Extract Flutter project
         shell: bash
         run: |
-          sudo apt-get install -y -qq unzip
+          mkdir -p "$RUNNER_TEMP/flutter_source"
+          ZIP_FILE=$(find "$GITHUB_WORKSPACE" -maxdepth 2 -name "Flutter-App-Full-SourceCode.zip" -print -quit)
 
-          ZIP_FILE="$GITHUB_WORKSPACE/Flutter-App-Full-SourceCode.zip"
-          EXTRACT_DIR="$RUNNER_TEMP/flutter_source"
-
-          if [ ! -f "$ZIP_FILE" ]; then
-            echo "ERROR: ZIP file not found!"
+          if [ -z "$ZIP_FILE" ]; then
+            echo "Project ZIP file not found"
             exit 1
           fi
 
-          mkdir -p "$EXTRACT_DIR"
+          unzip -q "$ZIP_FILE" -d "$RUNNER_TEMP/flutter_source"
 
-          unzip -tq "$ZIP_FILE" > /dev/null
-          unzip -oq "$ZIP_FILE" -d "$EXTRACT_DIR"
-
-          PROJECT_DIR=""
-
-          while IFS= read -r -d '' FILE; do
-            DIR="$(dirname "$FILE")"
-
-            if [ -d "$DIR/lib" ] && [ -d "$DIR/android" ]; then
-              PROJECT_DIR="$DIR"
+          PROJECT_DIR=$(find "$RUNNER_TEMP/flutter_source" -type f -name pubspec.yaml -printf '%h\n' | while read dir; do
+            if [ -d "$dir/lib" ] && [ -d "$dir/android" ]; then
+              echo "$dir"
               break
             fi
-          done < <(find "$EXTRACT_DIR" -type f -name "pubspec.yaml" -print0)
+          done)
 
           if [ -z "$PROJECT_DIR" ]; then
-            echo "ERROR: Flutter project not found!"
+            echo "Flutter project not found"
             exit 1
           fi
 
           echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
-
           echo "Project found: $PROJECT_DIR"
 
-      # 4. Setup Flutter
-      - name: Setup Flutter
+      - name: Set up Flutter
         uses: subosito/flutter-action@v2
         with:
           channel: stable
           cache: true
 
-      # 5. Configure Java
-      - name: Configure Flutter Java
-        run: |
-          flutter config --jdk-dir="$JAVA_HOME"
-          java -version
-          flutter --version
+      - name: Configure Java for Flutter
+        run: flutter config --jdk-dir="$JAVA_HOME"
 
-      # 6. Create missing Gradle Wrapper
-      - name: Fix Gradle Wrapper
+      - name: Create Gradle Wrapper 9.3.1
         shell: bash
         run: |
-          ANDROID_DIR="$PROJECT_DIR/android"
-          TEMP_GRADLE="$RUNNER_TEMP/gradle_setup"
-          GRADLE_ZIP="$RUNNER_TEMP/gradle-9.3.1-bin.zip"
+          set -e
 
-          mkdir -p "$TEMP_GRADLE"
-
-          echo "Downloading Gradle 9.3.1..."
+          GRADLE_DIR="$RUNNER_TEMP/gradle_setup"
+          mkdir -p "$GRADLE_DIR"
 
           curl -fL --retry 3 \
             https://services.gradle.org/distributions/gradle-9.3.1-bin.zip \
-            -o "$GRADLE_ZIP"
+            -o "$RUNNER_TEMP/gradle-9.3.1-bin.zip"
 
-          unzip -oq "$GRADLE_ZIP" -d "$TEMP_GRADLE"
-
-          GRADLE_BIN="$TEMP_GRADLE/gradle-9.3.1/bin/gradle"
+          unzip -q "$RUNNER_TEMP/gradle-9.3.1-bin.zip" -d "$GRADLE_DIR"
 
           mkdir -p "$RUNNER_TEMP/wrapper_project"
-
           cd "$RUNNER_TEMP/wrapper_project"
 
-          echo "rootProject.name = 'wrapper-generator'" > settings.gradle
+          echo "rootProject.name = 'wrapper_project'" > settings.gradle
           echo " " > build.gradle
 
-          "$GRADLE_BIN" wrapper \
+          "$GRADLE_DIR/gradle-9.3.1/bin/gradle" wrapper \
             --gradle-version 9.3.1 \
             --distribution-type bin
 
-          mkdir -p "$ANDROID_DIR/gradle/wrapper"
+          mkdir -p "$PROJECT_DIR/android/gradle/wrapper"
 
-          cp gradlew "$ANDROID_DIR/gradlew"
-          cp gradlew.bat "$ANDROID_DIR/gradlew.bat"
+          cp gradlew "$PROJECT_DIR/android/"
+          cp gradlew.bat "$PROJECT_DIR/android/"
+          cp gradle/wrapper/gradle-wrapper.jar "$PROJECT_DIR/android/gradle/wrapper/"
+          cp gradle/wrapper/gradle-wrapper.properties "$PROJECT_DIR/android/gradle/wrapper/"
 
-          cp gradle/wrapper/gradle-wrapper.jar \
-            "$ANDROID_DIR/gradle/wrapper/"
+          chmod +x "$PROJECT_DIR/android/gradlew"
 
-          cp gradle/wrapper/gradle-wrapper.properties \
-            "$ANDROID_DIR/gradle/wrapper/"
-
-          chmod +x "$ANDROID_DIR/gradlew"
-
-          echo "Gradle Wrapper created successfully."
-
-          cd "$ANDROID_DIR"
-
+          cd "$PROJECT_DIR/android"
           ./gradlew --version
 
-      # 7. Install Dependencies
-      - name: Flutter Pub Get
+      - name: Update Android Gradle Plugin and Kotlin
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import os
+          import re
+          from pathlib import Path
+
+          root = Path(os.environ["PROJECT_DIR"]) / "android"
+
+          files = [
+              root / "settings.gradle",
+              root / "settings.gradle.kts",
+              root / "build.gradle",
+              root / "build.gradle.kts",
+          ]
+
+          agp_updated = False
+          kotlin_updated = False
+
+          for file in files:
+              if not file.exists():
+                  continue
+
+              content = file.read_text()
+
+              # Modern plugins DSL
+              content, count = re.subn(
+                  r'((?:id\s*\(?\s*["\']com\.android\.(?:application|library)["\']\s*\)?\s*version\s*)["\'])[^"\']+(["\'])',
+                  r'\g<1>9.1.1\g<2>',
+                  content
+              )
+              agp_updated |= count > 0
+
+              # Legacy buildscript dependency
+              content, count = re.subn(
+                  r'(com\.android\.tools\.build:gradle:)[0-9.]+',
+                  r'\g<1>9.1.1',
+                  content
+              )
+              agp_updated |= count > 0
+
+              # Kotlin plugin in plugins DSL
+              content, count = re.subn(
+                  r'((?:id\s*\(?\s*["\']org\.jetbrains\.kotlin\.android["\']\s*\)?\s*version\s*)["\'])[^"\']+(["\'])',
+                  r'\g<1>2.2.10\g<2>',
+                  content
+              )
+              kotlin_updated |= count > 0
+
+              # Legacy Kotlin Gradle Plugin dependency
+              content, count = re.subn(
+                  r'(org\.jetbrains\.kotlin:kotlin-gradle-plugin:)[0-9.]+',
+                  r'\g<1>2.2.10',
+                  content
+              )
+              kotlin_updated |= count > 0
+
+              file.write_text(content)
+
+          if not agp_updated:
+              print("Could not find an AGP version to update.")
+              print("Android Gradle files:")
+              for file in root.glob("*"):
+                  print(file.name)
+              raise SystemExit(1)
+
+          print("Android Gradle Plugin updated to 9.1.1")
+          print("Kotlin plugin updated:", kotlin_updated)
+          PY
+
+          echo "Updated Android Gradle files:"
+          grep -R -n -E 'com.android.application|com.android.tools.build:gradle|kotlin-gradle-plugin|org.jetbrains.kotlin.android' \
+            "$PROJECT_DIR/android" \
+            --include="*.gradle" --include="*.gradle.kts" || true
+
+      - name: Get Flutter dependencies
         working-directory: ${{ env.PROJECT_DIR }}
         run: flutter pub get
 
-      # 8. Build APK
       - name: Build Release APK
         working-directory: ${{ env.PROJECT_DIR }}
         run: flutter build apk --release
 
-      # 9. Verify APK
       - name: Verify APK
-        working-directory: ${{ env.PROJECT_DIR }}
+        shell: bash
         run: |
-          APK="build/app/outputs/flutter-apk/app-release.apk"
+          APK="$PROJECT_DIR/build/app/outputs/flutter-apk/app-release.apk"
 
           if [ ! -f "$APK" ]; then
-            echo "ERROR: APK not generated!"
-            find build -name "*.apk" || true
+            echo "APK file was not generated"
             exit 1
           fi
 
-          echo "APK generated successfully:"
           ls -lh "$APK"
 
-      # 10. Upload APK
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: Flutter-Release-APK
           path: ${{ env.PROJECT_DIR }}/build/app/outputs/flutter-apk/app-release.apk
           if-no-files-found: error
-          retention-days: 14
