@@ -12,17 +12,15 @@ permissions:
 
 jobs:
   build:
-    name: Build Flutter Release APK
     runs-on: ubuntu-latest
 
     steps:
-
-      # Step 1: Checkout repository
+      # 1. Checkout repository
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      # Step 2: Verify ZIP and install unzip
-      - name: Prepare ZIP Extraction
+      # 2. Install unzip and extract ZIP directly
+      - name: Extract Flutter Source
         run: |
           sudo apt-get update
           sudo apt-get install -y unzip
@@ -31,105 +29,69 @@ jobs:
 
           if [ ! -f "$ZIP_FILE" ]; then
             echo "ERROR: ZIP file not found!"
-            echo "Files in repository:"
             ls -lah "$GITHUB_WORKSPACE"
             exit 1
           fi
 
-          if ! unzip -t "$ZIP_FILE"; then
-            echo "ERROR: ZIP file is corrupted!"
+          unzip -o "$ZIP_FILE" -d "$GITHUB_WORKSPACE"
+
+          echo "Project files:"
+          ls -lah "$GITHUB_WORKSPACE"
+
+          if [ ! -f "$GITHUB_WORKSPACE/pubspec.yaml" ]; then
+            echo "ERROR: pubspec.yaml not found in project root!"
             exit 1
           fi
 
-      # Step 3: Extract project
-      - name: Extract Flutter Project
-        run: |
-          EXTRACT_DIR="$RUNNER_TEMP/flutter_project"
-
-          mkdir -p "$EXTRACT_DIR"
-
-          unzip -q "$GITHUB_WORKSPACE/Flutter-App-Full-SourceCode.zip" \
-            -d "$EXTRACT_DIR"
-
-          echo "Extracted files:"
-          find "$EXTRACT_DIR" -maxdepth 3 -print | head -200
-
-          echo "Searching for Flutter project..."
-
-          PUBSPEC_FILES=$(find "$EXTRACT_DIR" \
-            -type f \
-            -name pubspec.yaml \
-            -not -path '*/.dart_tool/*')
-
-          if [ -z "$PUBSPEC_FILES" ]; then
-            echo "ERROR: pubspec.yaml was not found!"
+          if [ ! -d "$GITHUB_WORKSPACE/lib" ]; then
+            echo "ERROR: lib directory not found!"
             exit 1
           fi
 
-          PUBSPEC_COUNT=$(echo "$PUBSPEC_FILES" | wc -l)
-
-          if [ "$PUBSPEC_COUNT" -ne 1 ]; then
-            echo "ERROR: Multiple Flutter projects found!"
-            echo "$PUBSPEC_FILES"
+          if [ ! -d "$GITHUB_WORKSPACE/android" ]; then
+            echo "ERROR: android directory not found!"
             exit 1
           fi
 
-          PROJECT_DIR=$(dirname "$PUBSPEC_FILES")
-
-          if [ ! -d "$PROJECT_DIR/lib" ]; then
-            echo "ERROR: Flutter lib directory is missing!"
-            exit 1
-          fi
-
-          echo "Flutter project directory:"
-          echo "$PROJECT_DIR"
-
-          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
-
-      # Step 4: Setup Flutter
+      # 3. Setup Flutter stable
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
         with:
           channel: stable
           cache: true
 
-      # Step 5: Verify environment
-      - name: Flutter Environment
-        run: |
-          flutter --version
-          flutter doctor -v
+      # 4. Check Flutter
+      - name: Flutter Version
+        run: flutter --version
 
-      # Step 6: Install dependencies
-      - name: Install Flutter Dependencies
-        working-directory: ${{ env.PROJECT_DIR }}
-        run: |
-          flutter pub get
+      # 5. Install dependencies
+      - name: Install Dependencies
+        working-directory: ${{ github.workspace }}
+        run: flutter pub get
 
-      # Step 7: Build APK
+      # 6. Build Release APK
       - name: Build Release APK
-        working-directory: ${{ env.PROJECT_DIR }}
-        run: |
-          flutter build apk --release
+        working-directory: ${{ github.workspace }}
+        run: flutter build apk --release
 
-      # Step 8: Verify APK
+      # 7. Check APK
       - name: Verify APK
         run: |
-          APK_PATH="$PROJECT_DIR/build/app/outputs/flutter-apk/app-release.apk"
+          APK="$GITHUB_WORKSPACE/build/app/outputs/flutter-apk/app-release.apk"
 
-          if [ ! -f "$APK_PATH" ]; then
-            echo "ERROR: APK was not generated!"
-            find "$PROJECT_DIR/build" -type f -name "*.apk" || true
+          if [ ! -f "$APK" ]; then
+            echo "APK NOT FOUND!"
+            find "$GITHUB_WORKSPACE/build" -name "*.apk" || true
             exit 1
           fi
 
-          echo "APK successfully generated:"
-          ls -lh "$APK_PATH"
+          ls -lh "$APK"
 
-      # Step 9: Upload APK
-      - name: Upload APK Artifact
+      # 8. Upload APK
+      - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: Flutter-Release-APK
-          path: ${{ env.PROJECT_DIR }}/build/app/outputs/flutter-apk/app-release.apk
+          path: build/app/outputs/flutter-apk/app-release.apk
           if-no-files-found: error
           retention-days: 14
