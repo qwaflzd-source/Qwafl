@@ -27,8 +27,9 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      # 3. Extract ZIP and find Flutter project
+      # 3. Extract and detect project directory
       - name: Extract Flutter Source
+        shell: bash
         run: |
           sudo apt-get install -y -qq unzip
 
@@ -41,39 +42,35 @@ jobs:
           fi
 
           mkdir -p "$EXTRACT_DIR"
-
           unzip -oq "$ZIP_FILE" -d "$EXTRACT_DIR"
 
-          echo "Searching for pubspec.yaml..."
+          echo "Searching for Flutter project..."
 
-          PUBSPEC=$(find "$EXTRACT_DIR" \
-            -type f \
-            -name "pubspec.yaml" \
-            -not -path "*/.dart_tool/*" \
-            -print -quit)
+          PROJECT_DIR=""
 
-          if [ -z "$PUBSPEC" ]; then
-            echo "ERROR: pubspec.yaml not found anywhere in ZIP!"
-            find "$EXTRACT_DIR" -maxdepth 4 -type f | head -100
-            exit 1
-          fi
+          while IFS= read -r -d '' PUBSPEC; do
+            CANDIDATE="$(dirname "$PUBSPEC")"
 
-          PROJECT_DIR=$(dirname "$PUBSPEC")
+            if [ -f "$CANDIDATE/android/gradlew" ] && \
+               [ -d "$CANDIDATE/lib" ]; then
+              PROJECT_DIR="$CANDIDATE"
+              break
+            fi
+          done < <(find "$EXTRACT_DIR" -type f -name pubspec.yaml -print0)
 
-          if [ ! -d "$PROJECT_DIR/lib" ]; then
-            echo "ERROR: lib directory missing!"
-            exit 1
-          fi
-
-          if [ ! -d "$PROJECT_DIR/android" ]; then
-            echo "ERROR: android directory missing!"
+          if [ -z "$PROJECT_DIR" ]; then
+            echo "ERROR: Complete Flutter project not found!"
+            find "$EXTRACT_DIR" -maxdepth 5 -type f | head -150
             exit 1
           fi
 
           echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
 
-          echo "Flutter project found successfully!"
-          echo "Project path: $PROJECT_DIR"
+          echo "Project found: $PROJECT_DIR"
+          echo "Project contents:"
+          ls -lah "$PROJECT_DIR"
+          echo "Android contents:"
+          ls -lah "$PROJECT_DIR/android"
 
       # 4. Setup Flutter
       - name: Setup Flutter
@@ -82,32 +79,46 @@ jobs:
           channel: stable
           cache: true
 
-      # 5. Verify environment
+      # 5. Verify Environment
       - name: Verify Environment
+        shell: bash
         run: |
+          echo "Project: $PROJECT_DIR"
+          echo "Java:"
           java -version
+
+          echo "Flutter:"
           flutter --version
+
           cd "$PROJECT_DIR/android"
+
+          if [ ! -f gradlew ]; then
+            echo "ERROR: gradlew is missing!"
+            exit 1
+          fi
+
+          chmod +x gradlew
           ./gradlew --version
 
-      # 6. Install dependencies
+      # 6. Install Dependencies
       - name: Flutter Pub Get
         working-directory: ${{ env.PROJECT_DIR }}
         run: flutter pub get
 
-      # 7. Build APK
+      # 7. Build Release APK
       - name: Build Release APK
         working-directory: ${{ env.PROJECT_DIR }}
         run: flutter build apk --release
 
       # 8. Verify APK
       - name: Verify APK
+        working-directory: ${{ env.PROJECT_DIR }}
         run: |
-          APK="$PROJECT_DIR/build/app/outputs/flutter-apk/app-release.apk"
+          APK="build/app/outputs/flutter-apk/app-release.apk"
 
           if [ ! -f "$APK" ]; then
             echo "ERROR: APK not generated!"
-            find "$PROJECT_DIR/build" -name "*.apk" || true
+            find build -type f -name "*.apk" || true
             exit 1
           fi
 
