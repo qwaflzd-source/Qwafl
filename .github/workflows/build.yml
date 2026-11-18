@@ -16,99 +16,84 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # 1. Checkout repository
+      # 1. Checkout
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      # 2. Install Java 17
+      # 2. Setup Java 17
       - name: Setup Java 17
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
 
-      # 3. Verify Java version
-      - name: Verify Java
-        run: |
-          java -version
-          echo "JAVA_HOME=$JAVA_HOME"
-          echo "Java version:"
-          java -version
-
-      # 4. Install unzip and extract Flutter project
+      # 3. Extract Flutter ZIP quietly
       - name: Extract Flutter Source
         run: |
-          sudo apt-get update
-          sudo apt-get install -y unzip
+          sudo apt-get install -y -qq unzip
 
           ZIP_FILE="$GITHUB_WORKSPACE/Flutter-App-Full-SourceCode.zip"
 
           if [ ! -f "$ZIP_FILE" ]; then
             echo "ERROR: ZIP file not found!"
-            ls -lah "$GITHUB_WORKSPACE"
             exit 1
           fi
 
-          unzip -o "$ZIP_FILE" -d "$GITHUB_WORKSPACE"
+          mkdir -p "$RUNNER_TEMP/zip_check"
 
-          if [ ! -f "$GITHUB_WORKSPACE/pubspec.yaml" ]; then
-            echo "ERROR: pubspec.yaml not found!"
+          unzip -oq "$ZIP_FILE" -d "$RUNNER_TEMP/zip_check"
+
+          if [ ! -f "$RUNNER_TEMP/zip_check/pubspec.yaml" ]; then
+            echo "ERROR: pubspec.yaml not found at ZIP root!"
             exit 1
           fi
 
-          if [ ! -d "$GITHUB_WORKSPACE/lib" ]; then
-            echo "ERROR: lib directory not found!"
-            exit 1
-          fi
+          unzip -oq "$ZIP_FILE" -d "$GITHUB_WORKSPACE"
 
-          if [ ! -d "$GITHUB_WORKSPACE/android" ]; then
-            echo "ERROR: android directory not found!"
-            exit 1
-          fi
+          test -f "$GITHUB_WORKSPACE/pubspec.yaml"
+          test -d "$GITHUB_WORKSPACE/lib"
+          test -d "$GITHUB_WORKSPACE/android"
 
-          echo "Flutter project extracted successfully!"
+          echo "Flutter project extracted successfully."
 
-      # 5. Setup Flutter stable
+      # 4. Setup Flutter
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
         with:
           channel: stable
           cache: true
 
-      # 6. Verify Flutter and Java
-      - name: Verify Build Environment
+      # 5. Verify environment
+      - name: Verify Environment
         run: |
-          flutter --version
-          flutter doctor -v
           java -version
+          flutter --version
           cd android
           ./gradlew --version
 
-      # 7. Install Flutter dependencies
+      # 6. Install dependencies
       - name: Flutter Pub Get
-        working-directory: ${{ github.workspace }}
         run: flutter pub get
-
-      # 8. Build Release APK
-      - name: Build Release APK
         working-directory: ${{ github.workspace }}
-        run: flutter build apk --release
 
-      # 9. Verify APK
+      # 7. Build APK
+      - name: Build Release APK
+        run: flutter build apk --release
+        working-directory: ${{ github.workspace }}
+
+      # 8. Verify APK
       - name: Verify APK
         run: |
-          APK="$GITHUB_WORKSPACE/build/app/outputs/flutter-apk/app-release.apk"
+          APK="build/app/outputs/flutter-apk/app-release.apk"
 
           if [ ! -f "$APK" ]; then
-            echo "ERROR: APK was not generated!"
-            find "$GITHUB_WORKSPACE/build" -name "*.apk" || true
+            echo "ERROR: APK not generated!"
             exit 1
           fi
 
-          echo "APK generated successfully:"
           ls -lh "$APK"
 
-      # 10. Upload APK Artifact
+      # 9. Upload Artifact
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
