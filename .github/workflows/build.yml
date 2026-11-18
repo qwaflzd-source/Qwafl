@@ -183,6 +183,10 @@ jobs:
                   print(f"Updated: {file}")
           PY
 
+      - name: Upgrade page_transition
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: flutter pub add page_transition:^2.2.2
+
       - name: Get Flutter dependencies
         working-directory: ${{ env.PROJECT_DIR }}
         run: flutter pub get
@@ -199,20 +203,14 @@ jobs:
               "flutter_inappwebview_android-*/android/build.gradle"
           ))
 
-          if not files:
-              raise SystemExit("flutter_inappwebview_android build.gradle not found")
-
           for file in files:
               content = file.read_text()
-
               old = "proguard-android.txt"
               new = "proguard-android-optimize.txt"
 
               if old in content:
                   file.write_text(content.replace(old, new))
-                  print(f"Fixed ProGuard setting in {file}")
-              else:
-                  print(f"No old ProGuard setting found in {file}")
+                  print(f"Fixed: {file}")
           PY
 
       - name: Build Release APK
