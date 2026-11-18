@@ -22,7 +22,7 @@ jobs:
         uses: actions/checkout@v4
 
       # 2. Setup Java 17
-      - name: Setup Java
+      - name: Setup Java 17
         uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -51,12 +51,6 @@ jobs:
 
           unzip -oq "$ZIP_FILE" -d "$EXTRACT_DIR"
 
-          echo "ZIP extracted successfully."
-
-          echo "Searching project files..."
-
-          find "$EXTRACT_DIR" -maxdepth 4 -print
-
           PROJECT_DIR=""
 
           while IFS= read -r -d '' FILE; do
@@ -73,26 +67,13 @@ jobs:
 
           if [ -z "$PROJECT_DIR" ]; then
             echo "ERROR: Flutter project not found!"
-            echo "Checking extracted files:"
-            find "$EXTRACT_DIR" -maxdepth 6 -print
+            find "$EXTRACT_DIR" -maxdepth 5 -print
             exit 1
           fi
 
           echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
 
-          echo "================================"
-          echo "PROJECT FOUND:"
-          echo "$PROJECT_DIR"
-          echo "================================"
-
-          ls -la "$PROJECT_DIR"
-
-          if [ -f "$PROJECT_DIR/android/gradlew" ]; then
-            chmod +x "$PROJECT_DIR/android/gradlew"
-            echo "Gradle wrapper found."
-          else
-            echo "WARNING: Gradle wrapper is missing."
-          fi
+          echo "Project found: $PROJECT_DIR"
 
       # 4. Setup Flutter
       - name: Setup Flutter
@@ -101,29 +82,41 @@ jobs:
           channel: stable
           cache: true
 
-      # 5. Verify Environment
-      - name: Verify Environment
+      # 5. Force Flutter to use Java 17
+      - name: Configure Flutter Java
         run: |
-          echo "Java version:"
+          flutter config --jdk-dir="$JAVA_HOME"
+
+          echo "JAVA_HOME=$JAVA_HOME"
           java -version
 
-          echo "Flutter version:"
-          flutter --version
+          flutter doctor -v
 
-          echo "Project directory:"
-          echo "$PROJECT_DIR"
+      # 6. Verify Gradle version
+      - name: Verify Gradle Configuration
+        working-directory: ${{ env.PROJECT_DIR }}/android
+        run: |
+          echo "Gradle wrapper properties:"
+          cat gradle/wrapper/gradle-wrapper.properties
 
-      # 6. Install Dependencies
+          if [ -f gradlew ]; then
+            chmod +x gradlew
+            ./gradlew --version
+          else
+            echo "WARNING: Gradle wrapper not found."
+          fi
+
+      # 7. Install dependencies
       - name: Flutter Pub Get
         working-directory: ${{ env.PROJECT_DIR }}
         run: flutter pub get
 
-      # 7. Build Release APK
+      # 8. Build Release APK
       - name: Build Release APK
         working-directory: ${{ env.PROJECT_DIR }}
         run: flutter build apk --release
 
-      # 8. Verify APK
+      # 9. Verify APK
       - name: Verify APK
         working-directory: ${{ env.PROJECT_DIR }}
         run: |
@@ -131,14 +124,14 @@ jobs:
 
           if [ ! -f "$APK" ]; then
             echo "ERROR: APK not generated!"
-            find build -name "*.apk"
+            find build -name "*.apk" || true
             exit 1
           fi
 
-          echo "APK generated successfully!"
+          echo "APK generated successfully:"
           ls -lh "$APK"
 
-      # 9. Upload APK
+      # 10. Upload APK
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
