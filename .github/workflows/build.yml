@@ -33,7 +33,8 @@ jobs:
           set -e
           mkdir -p "$RUNNER_TEMP/flutter_source"
 
-          ZIP_FILE=$(find "$GITHUB_WORKSPACE" -maxdepth 2 -name "Flutter-App-Full-SourceCode.zip" -print -quit)
+          ZIP_FILE=$(find "$GITHUB_WORKSPACE" -maxdepth 2 \
+            -name "Flutter-App-Full-SourceCode.zip" -print -quit)
 
           if [ -z "$ZIP_FILE" ]; then
             echo "Flutter-App-Full-SourceCode.zip not found"
@@ -42,12 +43,14 @@ jobs:
 
           unzip -q "$ZIP_FILE" -d "$RUNNER_TEMP/flutter_source"
 
-          PROJECT_DIR=$(find "$RUNNER_TEMP/flutter_source" -type f -name pubspec.yaml -printf '%h\n' | while read dir; do
-            if [ -d "$dir/lib" ] && [ -d "$dir/android" ]; then
-              echo "$dir"
-              break
-            fi
-          done)
+          PROJECT_DIR=$(find "$RUNNER_TEMP/flutter_source" \
+            -type f -name pubspec.yaml -printf '%h\n' |
+            while read dir; do
+              if [ -d "$dir/lib" ] && [ -d "$dir/android" ]; then
+                echo "$dir"
+                break
+              fi
+            done)
 
           if [ -z "$PROJECT_DIR" ]; then
             echo "Flutter project not found"
@@ -70,8 +73,12 @@ jobs:
           java -version
 
       - name: Install Android SDK 36
+        shell: bash
         run: |
+          set -e
+
           yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses || true
+
           "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" \
             "platforms;android-36" \
             "build-tools;36.0.0"
@@ -80,6 +87,7 @@ jobs:
         shell: bash
         run: |
           set -e
+
           cd "$RUNNER_TEMP"
 
           wget -q https://services.gradle.org/distributions/gradle-9.3.1-bin.zip
@@ -90,7 +98,8 @@ jobs:
 
           echo "rootProject.name = 'wrapper_project'" > settings.gradle
 
-          "$RUNNER_TEMP/gradle-9.3.1/bin/gradle" wrapper --gradle-version 9.3.1
+          "$RUNNER_TEMP/gradle-9.3.1/bin/gradle" wrapper \
+            --gradle-version 9.3.1
 
           mkdir -p "$PROJECT_DIR/android/gradle/wrapper"
 
@@ -100,7 +109,7 @@ jobs:
 
           chmod +x "$PROJECT_DIR/android/gradlew"
 
-      - name: Update Android Gradle and Kotlin versions
+      - name: Fix Android Gradle Plugin and Kotlin versions
         shell: bash
         run: |
           set -e
@@ -112,50 +121,76 @@ jobs:
 
           root = Path(os.environ['PROJECT_DIR']) / 'android'
 
-          files = []
-          for name in [
-              'settings.gradle',
-              'settings.gradle.kts',
-              'build.gradle',
-              'build.gradle.kts'
-          ]:
-              p = root / name
-              if p.exists():
-                  files.append(p)
+          extensions = {'.gradle', '.kts', '.toml'}
+          files = [p for p in root.rglob('*') if p.is_file() and p.suffix in extensions]
+
+          agp_patterns = [
+              (
+                  r'(id\s*\(?\s*["\']com\.android\.(?:application|library)["\']\s*\)?\s*version\s*["\'])[0-9.]+(["\'])',
+                  r'\g<1>9.1.1\2'
+              ),
+              (
+                  r'(com\.android\.tools\.build:gradle:)[0-9.]+',
+                  r'\g<1>9.1.1'
+              ),
+              (
+                  r'(\bagp\s*=\s*["\'])[0-9.]+(["\'])',
+                  r'\g<1>9.1.1\2'
+              )
+          ]
+
+          kotlin_patterns = [
+              (
+                  r'(id\s*\(?\s*["\']org\.jetbrains\.kotlin\.android["\']\s*\)?\s*version\s*["\'])[0-9.]+(["\'])',
+                  r'\g<1>2.2.10\2'
+              ),
+              (
+                  r'(org\.jetbrains\.kotlin:kotlin-gradle-plugin:)[0-9.]+',
+                  r'\g<1>2.2.10'
+              ),
+              (
+                  r'(\bkotlin\s*=\s*["\'])[0-9.]+(["\'])',
+                  r'\g<1>2.2.10\2'
+              )
+          ]
 
           for file in files:
               text = file.read_text()
+              original = text
 
-              text = re.sub(
-                  r'(com\.android\.(?:application|library)\s+version\s+["\']?)[0-9.]+',
-                  r'\g<1>9.1.1',
-                  text
-              )
+              for pattern, replacement in agp_patterns + kotlin_patterns:
+                  text = re.sub(pattern, replacement, text)
 
-              text = re.sub(
-                  r'com\.android\.tools\.build:gradle:[0-9.]+',
-                  'com.android.tools.build:gradle:9.1.1',
-                  text
-              )
+              if text != original:
+                  file.write_text(text)
+                  print("Updated:", file)
 
-              text = re.sub(
-                  r'(org\.jetbrains\.kotlin\.android\s+version\s+["\']?)[0-9.]+',
-                  r'\g<1>2.2.10',
-                  text
-              )
+          settings = root / 'settings.gradle'
+          if settings.exists():
+              print("\n--- settings.gradle ---")
+              print(settings.read_text())
 
-              text = re.sub(
-                  r'org\.jetbrains\.kotlin:kotlin-gradle-plugin:[0-9.]+',
-                  'org.jetbrains.kotlin:kotlin-gradle-plugin:2.2.10',
-                  text
-              )
-
-              file.write_text(text)
-
-          print("Gradle plugin versions updated.")
+          print("\nAGP/Kotlin update completed.")
           PY
 
-      - name: Set compileSdk 36 safely
+      - name: Verify Android Gradle Plugin version
+        shell: bash
+        run: |
+          set -e
+
+          if grep -R -nE \
+            'com.android.application.*8\.6\.0|com.android.tools.build:gradle:8\.6\.0' \
+            "$PROJECT_DIR/android" \
+            --include='*.gradle' \
+            --include='*.kts' \
+            --include='*.toml'; then
+            echo "Old AGP 8.6.0 reference still exists."
+            exit 1
+          fi
+
+          echo "Checking Android Gradle configuration..."
+
+      - name: Set compileSdk to 36
         shell: bash
         run: |
           set -e
@@ -166,6 +201,7 @@ jobs:
           import re
 
           app = Path(os.environ['PROJECT_DIR']) / 'android/app/build.gradle'
+
           if not app.exists():
               app = Path(os.environ['PROJECT_DIR']) / 'android/app/build.gradle.kts'
 
@@ -174,36 +210,32 @@ jobs:
 
           text = app.read_text()
 
-          patterns = [
-              r'^(\s*)compileSdkVersion\s+.*$',
-              r'^(\s*)compileSdk\s*=\s*.*$',
-              r'^(\s*)compileSdk\s+.*$',
-          ]
-
-          for pattern in patterns:
-              updated, count = re.subn(
-                  pattern,
-                  lambda m: m.group(1) + (
-                      'compileSdk = 36'
-                      if app.suffix == '.kts'
-                      else 'compileSdkVersion 36'
-                  ),
-                  text,
-                  count=1,
-                  flags=re.MULTILINE
-              )
-              if count:
-                  text = updated
-                  break
+          if app.suffix == '.kts':
+              replacement = 'compileSdk = 36'
           else:
-              raise SystemExit("Could not find compileSdk declaration in app Gradle file")
+              replacement = 'compileSdkVersion 36'
 
-          app.write_text(text)
+          pattern = r'^(\s*)compileSdk(?:Version)?\s*(?:=\s*)?.*$'
 
-          print("Updated app compileSdk to 36:")
-          for line in text.splitlines():
-              if 'compileSdk' in line:
-                  print(line)
+          updated, count = re.subn(
+              pattern,
+              lambda m: m.group(1) + replacement,
+              text,
+              count=1,
+              flags=re.MULTILINE
+          )
+
+          if count == 0:
+              match = re.search(r'(?m)^(\s*)android\s*\{', text)
+              if not match:
+                  raise SystemExit("Could not find android block")
+
+              pos = match.end()
+              updated = text[:pos] + '\n    ' + replacement + text[pos:]
+
+          app.write_text(updated)
+
+          print("compileSdk set to 36.")
           PY
 
       - name: Fix Gradle properties
@@ -231,6 +263,7 @@ jobs:
               ]
 
               lines.append('android.r8.optimizedResourceShrinking=false')
+
               file.write_text('\n'.join(lines) + '\n')
           PY
 
@@ -253,7 +286,9 @@ jobs:
             -path "*/flutter_inappwebview_android-*/android/build.gradle" \
             -type f -print0 |
           while IFS= read -r -d '' file; do
-            sed -i 's/proguard-android\.txt/proguard-android-optimize.txt/g' "$file"
+            sed -i \
+              's/proguard-android\.txt/proguard-android-optimize.txt/g' \
+              "$file"
           done
 
       - name: Build Release APK
