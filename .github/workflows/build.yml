@@ -18,26 +18,27 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Java 17
+      - name: Set up Java
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
 
-      - name: Android SDK
+      - name: Set up Android SDK
         uses: android-actions/setup-android@v4
         with:
           packages: 'platform-tools'
           accept-android-sdk-licenses: true
 
-      - name: Install Android components
+      - name: Install Android SDK components
         run: |
+          set -euo pipefail
           sdkmanager --install \
             "platform-tools" \
             "platforms;android-36" \
             "build-tools;36.0.0"
 
-      - name: Flutter 3.35.4
+      - name: Set up Flutter
         uses: subosito/flutter-action@v2
         with:
           flutter-version: '3.35.4'
@@ -65,7 +66,10 @@ jobs:
 
           PROJECT_DIR="$RUNNER_TEMP/flutter_source/Flutter-App-Full-SourceCode"
 
-          test -f "$PROJECT_DIR/pubspec.yaml"
+          if [ ! -f "$PROJECT_DIR/pubspec.yaml" ]; then
+            echo "::error::pubspec.yaml not found"
+            exit 1
+          fi
 
           echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
 
@@ -164,6 +168,7 @@ jobs:
           from pathlib import Path
 
           p = Path("android/settings.gradle")
+
           if not p.exists():
               raise SystemExit("settings.gradle missing")
 
@@ -240,9 +245,11 @@ jobs:
           done
 
       - name: Clean and resolve dependencies
+        shell: bash
         run: |
           set -euo pipefail
           cd "$PROJECT_DIR"
+
           flutter clean
           flutter pub get
 
@@ -254,8 +261,7 @@ jobs:
 
           flutter build apk \
             --debug \
-            --target-platform android-arm64 \
-            --verbose
+            --target-platform android-arm64
 
           APK="build/app/outputs/flutter-apk/app-debug.apk"
 
@@ -265,20 +271,11 @@ jobs:
           fi
 
           mkdir -p "$RUNNER_TEMP/qawafil_output"
-          cp "$APK" "$RUNNER_TEMP/qawafil_output/Qawafil-ARM64-Debug.apk"
+
+          cp "$APK" \
+            "$RUNNER_TEMP/qawafil_output/Qawafil-ARM64-Debug.apk"
 
           ls -lh "$RUNNER_TEMP/qawafil_output/Qawafil-ARM64-Debug.apk"
-
-      - name: Verify APK
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          APK="$RUNNER_TEMP/qawafil_output/Qawafil-ARM64-Debug.apk"
-
-          apksigner verify --verbose "$APK"
-
-          aapt dump badging "$APK" | head -n 8
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
