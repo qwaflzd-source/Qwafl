@@ -280,12 +280,12 @@ jobs:
         shell: bash
         run: |
           set -uo pipefail
-          KS="$HOME/.android/debug.keystore"
-          [ -f "$KS" ] || KS="/root/.android/debug.keystore"
-          if [ -f "$KS" ]; then
-            keytool -list -v -keystore "$KS" -alias androiddebugkey -storepass android -keypass android | grep -i "SHA1:" || true
+          APK="$RUNNER_TEMP/qawafil_output/Qawafil-ARM64-Debug.apk"
+          APKSIGNER="$(find "$ANDROID_HOME/build-tools" -name apksigner 2>/dev/null | sort -V | tail -n 1)"
+          if [ -n "$APKSIGNER" ] && [ -f "$APK" ]; then
+            "$APKSIGNER" verify --print-certs "$APK" | grep -i "SHA-1 digest:" || true
           else
-            echo "debug.keystore not found at $KS"
+            find "$HOME" /root -name "*.keystore" 2>/dev/null || true
           fi
 
       - name: Upload APK
