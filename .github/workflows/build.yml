@@ -1,4 +1,3 @@
-
 name: Build Qawafil APK
 
 on:
@@ -276,6 +275,12 @@ jobs:
             "$RUNNER_TEMP/qawafil_output/Qawafil-ARM64-Debug.apk"
 
           ls -lh "$RUNNER_TEMP/qawafil_output/Qawafil-ARM64-Debug.apk"
+
+      - name: Print Debug APK SHA-1
+        shell: bash
+        run: |
+          set -euo pipefail
+          keytool -printcert -jarfile "$RUNNER_TEMP/qawafil_output/Qawafil-ARM64-Debug.apk" | grep -i "SHA1:"
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
