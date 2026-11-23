@@ -1,3 +1,4 @@
+
 name: Build Qawafil APK
 
 on:
@@ -30,11 +31,19 @@ jobs:
           accept-android-sdk-licenses: true
 
       - name: Install Android SDK components
+        shell: bash
         run: |
           set -euo pipefail
+
           sdkmanager --install \
             "platform-tools" \
+            "platforms;android-33" \
+            "platforms;android-34" \
+            "platforms;android-35" \
             "platforms;android-36" \
+            "build-tools;33.0.2" \
+            "build-tools;34.0.0" \
+            "build-tools;35.0.0" \
             "build-tools;36.0.0"
 
       - name: Set up Flutter
@@ -44,52 +53,95 @@ jobs:
           channel: stable
           cache: true
 
-      - name: Extract source
+      - name: Locate and Extract Flutter Source
         shell: bash
         run: |
           set -euo pipefail
 
-          ZIP_FILE="$(find . -maxdepth 4 -type f \
-            -name 'Flutter-App-Full-SourceCode.zip' -print -quit)"
+          if [ -f "pubspec.yaml" ]; then
+            PROJECT_DIR="$GITHUB_WORKSPACE"
 
-          if [ -z "$ZIP_FILE" ]; then
-            echo "::error::Source ZIP not found"
-            exit 1
+          else
+            ZIP_FILE=""
+
+            if [ -f "Flutter-App-Full-SourceCode.zip" ]; then
+              ZIP_FILE="Flutter-App-Full-SourceCode.zip"
+            else
+              ZIP_FILE="$(find . -maxdepth 5 -type f \
+                -name 'Flutter-App-Full-SourceCode.zip' \
+                -print -quit)"
+            fi
+
+            if [ -z "$ZIP_FILE" ]; then
+              echo "::error::Flutter project and source ZIP were not found"
+              exit 1
+            fi
+
+            EXTRACT_DIR="$RUNNER_TEMP/flutter_source"
+            mkdir -p "$EXTRACT_DIR"
+
+            unzip -q "$ZIP_FILE" \
+              -d "$EXTRACT_DIR" \
+              -x '*/.cxx/*' '*/.dart_tool/*' '*/build/*' '*/.gradle/*'
+
+            mapfile -t PROJECTS < <(
+              find "$EXTRACT_DIR" \
+                -type f \
+                -name pubspec.yaml \
+                -not -path '*/.dart_tool/*' \
+                -not -path '*/build/*' \
+                -not -path '*/.pub-cache/*' \
+                -printf '%h\n'
+            )
+
+            if [ "${#PROJECTS[@]}" -ne 1 ]; then
+              echo "::error::Expected exactly one Flutter project, found ${#PROJECTS[@]}"
+              printf '%s\n' "${PROJECTS[@]}"
+              exit 1
+            fi
+
+            PROJECT_DIR="${PROJECTS[0]}"
           fi
-
-          mkdir -p "$RUNNER_TEMP/flutter_source"
-
-          unzip -q "$ZIP_FILE" \
-            -d "$RUNNER_TEMP/flutter_source" \
-            -x '*/.cxx/*' '*/.dart_tool/*' '*/build/*' '*/.gradle/*'
-
-          PROJECT_DIR="$RUNNER_TEMP/flutter_source/Flutter-App-Full-SourceCode"
 
           if [ ! -f "$PROJECT_DIR/pubspec.yaml" ]; then
             echo "::error::pubspec.yaml not found"
             exit 1
           fi
 
+          if [ ! -d "$PROJECT_DIR/android" ]; then
+            echo "::error::Android project directory not found"
+            exit 1
+          fi
+
+          if [ ! -f "$PROJECT_DIR/android/gradlew" ]; then
+            echo "::error::Gradle wrapper not found"
+            exit 1
+          fi
+
           echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
 
-      - name: Configure Firebase package and MainActivity
+          echo "Flutter project located:"
+          echo "$PROJECT_DIR"
+
+      - name: Verify Firebase Configuration
         shell: bash
         run: |
           set -euo pipefail
           cd "$PROJECT_DIR"
 
+          FIREBASE_FILE="android/app/google-services.json"
+
+          if [ ! -f "$FIREBASE_FILE" ]; then
+            echo "::error::google-services.json not found"
+            exit 1
+          fi
+
           python3 - <<'PY'
           import json
-          import re
           from pathlib import Path
 
-          gradle = Path("android/app/build.gradle")
-          firebase = Path("android/app/google-services.json")
-
-          if not gradle.exists() or not firebase.exists():
-              raise SystemExit("Android Gradle or Firebase configuration missing")
-
-          data = json.loads(firebase.read_text(encoding="utf-8"))
+          p = Path("android/app/google-services.json")
+          data = json.loads(p.read_text(encoding="utf-8"))
 
           packages = [
               c.get("client_info", {})
@@ -98,152 +150,51 @@ jobs:
               for c in data.get("client", [])
           ]
 
-          packages = [p for p in packages if p]
+          packages = [x for x in packages if x]
 
           if not packages:
-              raise SystemExit("No Android Firebase client found")
+              raise SystemExit("No Android package found in Firebase configuration")
 
-          package = (
-              "com.qwafily.app"
-              if "com.qwafily.app" in packages
-              else packages[0]
-          )
-
-          if not re.fullmatch(
-              r"[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)+",
-              package
-          ):
-              raise SystemExit("Invalid Firebase package name")
-
-          text = gradle.read_text(encoding="utf-8")
-
-          text, n1 = re.subn(
-              r'(?m)^(\s*namespace\s*=\s*)["\'][^"\']+["\']',
-              lambda m: m.group(1) + f'"{package}"',
-              text, count=1
-          )
-
-          text, n2 = re.subn(
-              r'(?m)^(\s*applicationId\s*=\s*)["\'][^"\']+["\']',
-              lambda m: m.group(1) + f'"{package}"',
-              text, count=1
-          )
-
-          if n1 != 1 or n2 != 1:
-              raise SystemExit("Could not update namespace/applicationId")
-
-          gradle.write_text(text, encoding="utf-8")
-
-          src = Path("android/app/src/main")
-
-          for p in src.rglob("*"):
-              if p.is_file() and p.name in ("MainActivity.kt", "MainActivity.java"):
-                  p.unlink()
-
-          activity_dir = src / "kotlin" / package.replace(".", "/")
-          activity_dir.mkdir(parents=True, exist_ok=True)
-
-          (activity_dir / "MainActivity.kt").write_text(
-              f"""package {package}
-
-          import io.flutter.embedding.android.FlutterActivity
-
-          class MainActivity : FlutterActivity()
-          """,
-              encoding="utf-8"
-          )
-
-          print("Configured package:", package)
+          print("Firebase Android package(s):")
+          for package in packages:
+              print(" -", package)
           PY
 
-      - name: Configure Android Gradle Plugin
+      - name: Restore Existing Firebase Debug Keystore
         shell: bash
-        run: |
-          set -euo pipefail
-          cd "$PROJECT_DIR"
-
-          python3 - <<'PY'
-          import re
-          from pathlib import Path
-
-          p = Path("android/settings.gradle")
-
-          if not p.exists():
-              raise SystemExit("settings.gradle missing")
-
-          s = p.read_text(encoding="utf-8")
-
-          pattern = (
-              r'(id\s+["\']com\.android\.application["\']'
-              r'\s+version\s+["\'])[^"\']+(["\'])'
-          )
-
-          s, n = re.subn(pattern, r'\g<1>8.10.1\g<2>', s, count=1)
-
-          if n != 1:
-              raise SystemExit("Android application plugin declaration not found")
-
-          p.write_text(s, encoding="utf-8")
-          PY
-
-      - name: Set up Gradle
-        uses: gradle/actions/setup-gradle@v4
-        with:
-          gradle-version: '8.11.1'
-
-      - name: Generate Gradle wrapper
-        shell: bash
-        run: |
-          set -euo pipefail
-          cd "$PROJECT_DIR"
-
-          FLUTTER_BIN="$(readlink -f "$(command -v flutter)")"
-          FLUTTER_ROOT="$(dirname "$(dirname "$FLUTTER_BIN")")"
-
-          mkdir -p android
-
-          {
-            echo "sdk.dir=$ANDROID_HOME"
-            echo "flutter.sdk=$FLUTTER_ROOT"
-          } > android/local.properties
-
-          cd android
-
-          gradle wrapper \
-            --gradle-version 8.11.1 \
-            --distribution-type all
-
-          chmod +x gradlew
-          ./gradlew --version
-
-      - name: Update Flutter downloader
-        shell: bash
-        run: |
-          set -euo pipefail
-          cd "$PROJECT_DIR"
-
-          flutter pub add "flutter_downloader:^1.12.1"
-          flutter pub get
-
-      - name: Fix InAppWebView ProGuard reference
-        shell: bash
+        env:
+          DEBUG_KEYSTORE_B64: ${{ secrets.DEBUG_KEYSTORE_B64 }}
         run: |
           set -euo pipefail
 
-          PUB_CACHE="${PUB_CACHE:-$HOME/.pub-cache}"
+          if [ -z "${DEBUG_KEYSTORE_B64:-}" ]; then
+            echo "::error::DEBUG_KEYSTORE_B64 secret is missing"
+            exit 1
+          fi
 
-          find "$PUB_CACHE" \
-            -type f \
-            -path '*flutter_inappwebview_android*' \
-            -name '*.gradle' \
-            -print0 |
-          while IFS= read -r -d '' file; do
-            sed -i \
-              's/proguard-android\.txt/proguard-android-optimize.txt/g' \
-              "$file"
-          done
+          mkdir -p "$HOME/.android"
 
-      - name: Clean and resolve dependencies
+          echo "$DEBUG_KEYSTORE_B64" | base64 --decode \
+            > "$HOME/.android/debug.keystore"
+
+          if [ ! -s "$HOME/.android/debug.keystore" ]; then
+            echo "::error::Debug keystore restoration failed"
+            exit 1
+          fi
+
+          echo "Verifying restored debug keystore..."
+
+          keytool -list -v \
+            -keystore "$HOME/.android/debug.keystore" \
+            -storepass android \
+            -alias androiddebugkey \
+            > "$RUNNER_TEMP/debug-keystore-info.txt"
+
+          echo "Existing Debug Keystore restored successfully"
+
+          grep -i "SHA1:" "$RUNNER_TEMP/debug-keystore-info.txt" || true
+
+      - name: Clean and Resolve Dependencies
         shell: bash
         run: |
           set -euo pipefail
@@ -252,17 +203,15 @@ jobs:
           flutter clean
           flutter pub get
 
-      - name: Restore Current Debug Keystore
+      - name: Verify Android Gradle Wrapper
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p "$HOME/.android"
-          if [ -n "${DEBUG_KEYSTORE_B64:-}" ]; then
-            echo "$DEBUG_KEYSTORE_B64" | base64 -d > "$HOME/.android/debug.keystore"
-            echo "Restored current debug.keystore"
-          fi
-        env:
-          DEBUG_KEYSTORE_B64: ${{ secrets.DEBUG_KEYSTORE_B64 }}
+          cd "$PROJECT_DIR/android"
+
+          chmod +x gradlew
+
+          ./gradlew --version
 
       - name: Build ARM64 Debug APK
         shell: bash
@@ -288,17 +237,53 @@ jobs:
 
           ls -lh "$RUNNER_TEMP/qawafil_output/Qawafil-ARM64-Debug.apk"
 
-      - name: Print Debug APK SHA-1
+      - name: Verify APK Signing SHA-1
         shell: bash
         run: |
-          set -uo pipefail
+          set -euo pipefail
+
           APK="$RUNNER_TEMP/qawafil_output/Qawafil-ARM64-Debug.apk"
-          APKSIGNER="$(find "$ANDROID_HOME/build-tools" -name apksigner 2>/dev/null | sort -V | tail -n 1)"
-          if [ -n "$APKSIGNER" ] && [ -f "$APK" ]; then
-            "$APKSIGNER" verify --print-certs "$APK" | grep -i "SHA-1 digest:" || true
-          else
-            find "$HOME" /root -name "*.keystore" 2>/dev/null || true
+
+          APKSIGNER="$ANDROID_HOME/build-tools/36.0.0/apksigner"
+
+          if [ ! -f "$APKSIGNER" ]; then
+            echo "::error::apksigner not found"
+            exit 1
           fi
+
+          echo "Checking APK signature..."
+
+          "$APKSIGNER" verify --print-certs "$APK" \
+            | tee "$RUNNER_TEMP/apk-signature.txt"
+
+          echo "Checking restored keystore fingerprint..."
+
+          keytool -list -v \
+            -keystore "$HOME/.android/debug.keystore" \
+            -storepass android \
+            -alias androiddebugkey \
+            | tee "$RUNNER_TEMP/keystore-signature.txt"
+
+          APK_SHA1="$(grep -i 'SHA-1 digest:' "$RUNNER_TEMP/apk-signature.txt" \
+            | head -n 1 | sed 's/.*SHA-1 digest: *//' | tr -d ':' | tr '[:lower:]' '[:upper:]')"
+
+          KEY_SHA1="$(grep -i 'SHA1:' "$RUNNER_TEMP/keystore-signature.txt" \
+            | head -n 1 | sed 's/.*SHA1: *//' | tr -d ':' | tr '[:lower:]' '[:upper:]')"
+
+          if [ -z "$APK_SHA1" ] || [ -z "$KEY_SHA1" ]; then
+            echo "::error::Could not read signing fingerprints"
+            exit 1
+          fi
+
+          echo "APK SHA-1: $APK_SHA1"
+          echo "KEY SHA-1: $KEY_SHA1"
+
+          if [ "$APK_SHA1" != "$KEY_SHA1" ]; then
+            echo "::error::APK fingerprint does not match restored Firebase debug keystore"
+            exit 1
+          fi
+
+          echo "SHA-1 fingerprints match successfully"
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
