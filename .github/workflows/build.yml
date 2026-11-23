@@ -58,70 +58,68 @@ jobs:
         run: |
           set -euo pipefail
 
-          if [ -f "pubspec.yaml" ]; then
+          EXTRACT_DIR="$RUNNER_TEMP/flutter_source"
+          mkdir -p "$EXTRACT_DIR"
+
+          if [ -f "$GITHUB_WORKSPACE/pubspec.yaml" ] && \
+             [ -d "$GITHUB_WORKSPACE/android" ]; then
+
             PROJECT_DIR="$GITHUB_WORKSPACE"
 
           else
-            ZIP_FILE=""
-
-            if [ -f "Flutter-App-Full-SourceCode.zip" ]; then
-              ZIP_FILE="Flutter-App-Full-SourceCode.zip"
-            else
-              ZIP_FILE="$(find . -maxdepth 5 -type f \
-                -name 'Flutter-App-Full-SourceCode.zip' \
-                -print -quit)"
-            fi
+            ZIP_FILE="$(find "$GITHUB_WORKSPACE" \
+              -maxdepth 5 \
+              -type f \
+              -name 'Flutter-App-Full-SourceCode.zip' \
+              -print -quit)"
 
             if [ -z "$ZIP_FILE" ]; then
-              echo "::error::Flutter project and source ZIP were not found"
+              echo "::error::Source ZIP not found"
               exit 1
             fi
 
-            EXTRACT_DIR="$RUNNER_TEMP/flutter_source"
-            mkdir -p "$EXTRACT_DIR"
+            echo "Extracting source: $ZIP_FILE"
 
-            unzip -q "$ZIP_FILE" \
-              -d "$EXTRACT_DIR" \
-              -x '*/.cxx/*' '*/.dart_tool/*' '*/build/*' '*/.gradle/*'
+            unzip -q "$ZIP_FILE" -d "$EXTRACT_DIR"
 
-            mapfile -t PROJECTS < <(
+            PROJECT_DIR=""
+
+            while IFS= read -r PUBSPEC; do
+              CANDIDATE="$(dirname "$PUBSPEC")"
+
+              if [ -f "$CANDIDATE/pubspec.yaml" ] && \
+                 [ -d "$CANDIDATE/android" ]; then
+
+                if [ -n "$PROJECT_DIR" ]; then
+                  echo "::error::Multiple Flutter projects found"
+                  exit 1
+                fi
+
+                PROJECT_DIR="$CANDIDATE"
+              fi
+
+            done < <(
               find "$EXTRACT_DIR" \
                 -type f \
-                -name pubspec.yaml \
-                -not -path '*/.dart_tool/*' \
-                -not -path '*/build/*' \
-                -not -path '*/.pub-cache/*' \
-                -printf '%h\n'
+                -name pubspec.yaml
             )
 
-            if [ "${#PROJECTS[@]}" -ne 1 ]; then
-              echo "::error::Expected exactly one Flutter project, found ${#PROJECTS[@]}"
-              printf '%s\n' "${PROJECTS[@]}"
+            if [ -z "$PROJECT_DIR" ]; then
+              echo "::error::Flutter project not found in ZIP"
+              find "$EXTRACT_DIR" -maxdepth 5 -type f \
+                \( -name pubspec.yaml -o -name gradlew \)
               exit 1
             fi
-
-            PROJECT_DIR="${PROJECTS[0]}"
-          fi
-
-          if [ ! -f "$PROJECT_DIR/pubspec.yaml" ]; then
-            echo "::error::pubspec.yaml not found"
-            exit 1
-          fi
-
-          if [ ! -d "$PROJECT_DIR/android" ]; then
-            echo "::error::Android project directory not found"
-            exit 1
-          fi
-
-          if [ ! -f "$PROJECT_DIR/android/gradlew" ]; then
-            echo "::error::Gradle wrapper not found"
-            exit 1
           fi
 
           echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
 
-          echo "Flutter project located:"
+          echo "Flutter project:"
           echo "$PROJECT_DIR"
+
+          echo "Project files:"
+          ls -la "$PROJECT_DIR"
+          ls -la "$PROJECT_DIR/android"
 
       - name: Verify Firebase Configuration
         shell: bash
@@ -153,12 +151,57 @@ jobs:
           packages = [x for x in packages if x]
 
           if not packages:
-              raise SystemExit("No Android package found in Firebase configuration")
+              raise SystemExit("No Android Firebase client found")
 
-          print("Firebase Android package(s):")
+          print("Firebase Android packages:")
           for package in packages:
               print(" -", package)
           PY
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.11.1'
+
+      - name: Prepare Android Gradle Wrapper
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$PROJECT_DIR"
+
+          FLUTTER_BIN="$(readlink -f "$(command -v flutter)")"
+          FLUTTER_ROOT="$(dirname "$(dirname "$FLUTTER_BIN")")"
+
+          mkdir -p android
+
+          {
+            echo "sdk.dir=$ANDROID_HOME"
+            echo "flutter.sdk=$FLUTTER_ROOT"
+          } > android/local.properties
+
+          cd android
+
+          if [ ! -f gradlew ] || \
+             [ ! -f gradle/wrapper/gradle-wrapper.properties ]; then
+
+            echo "Gradle wrapper missing. Generating wrapper..."
+
+            gradle wrapper \
+              --gradle-version 8.11.1 \
+              --distribution-type all
+
+          else
+            echo "Existing Gradle wrapper found."
+          fi
+
+          if [ ! -f gradlew ]; then
+            echo "::error::Gradle wrapper generation failed"
+            exit 1
+          fi
+
+          chmod +x gradlew
+
+          ./gradlew --version
 
       - name: Restore Existing Firebase Debug Keystore
         shell: bash
@@ -182,17 +225,39 @@ jobs:
             exit 1
           fi
 
-          echo "Verifying restored debug keystore..."
+          keytool -list \
+            -keystore "$HOME/.android/debug.keystore" \
+            -storepass android \
+            -alias androiddebugkey \
+            > /dev/null
+
+          echo "Existing Debug Keystore restored successfully"
 
           keytool -list -v \
             -keystore "$HOME/.android/debug.keystore" \
             -storepass android \
             -alias androiddebugkey \
-            > "$RUNNER_TEMP/debug-keystore-info.txt"
+            | grep -i "SHA1:"
 
-          echo "Existing Debug Keystore restored successfully"
+      - name: Fix InAppWebView ProGuard Reference
+        shell: bash
+        run: |
+          set -euo pipefail
 
-          grep -i "SHA1:" "$RUNNER_TEMP/debug-keystore-info.txt" || true
+          PUB_CACHE="${PUB_CACHE:-$HOME/.pub-cache}"
+
+          if [ -d "$PUB_CACHE" ]; then
+            find "$PUB_CACHE" \
+              -type f \
+              -path '*flutter_inappwebview_android*' \
+              -name '*.gradle' \
+              -print0 |
+            while IFS= read -r -d '' file; do
+              sed -i \
+                's/proguard-android\.txt/proguard-android-optimize.txt/g' \
+                "$file"
+            done
+          fi
 
       - name: Clean and Resolve Dependencies
         shell: bash
@@ -203,13 +268,11 @@ jobs:
           flutter clean
           flutter pub get
 
-      - name: Verify Android Gradle Wrapper
+      - name: Verify Gradle Configuration
         shell: bash
         run: |
           set -euo pipefail
           cd "$PROJECT_DIR/android"
-
-          chmod +x gradlew
 
           ./gradlew --version
 
@@ -251,12 +314,8 @@ jobs:
             exit 1
           fi
 
-          echo "Checking APK signature..."
-
           "$APKSIGNER" verify --print-certs "$APK" \
             | tee "$RUNNER_TEMP/apk-signature.txt"
-
-          echo "Checking restored keystore fingerprint..."
 
           keytool -list -v \
             -keystore "$HOME/.android/debug.keystore" \
@@ -264,11 +323,21 @@ jobs:
             -alias androiddebugkey \
             | tee "$RUNNER_TEMP/keystore-signature.txt"
 
-          APK_SHA1="$(grep -i 'SHA-1 digest:' "$RUNNER_TEMP/apk-signature.txt" \
-            | head -n 1 | sed 's/.*SHA-1 digest: *//' | tr -d ':' | tr '[:lower:]' '[:upper:]')"
+          APK_SHA1="$(
+            grep -i 'SHA-1 digest:' "$RUNNER_TEMP/apk-signature.txt" \
+            | head -n 1 \
+            | sed 's/.*SHA-1 digest: *//' \
+            | tr -d ':' \
+            | tr '[:lower:]' '[:upper:]'
+          )"
 
-          KEY_SHA1="$(grep -i 'SHA1:' "$RUNNER_TEMP/keystore-signature.txt" \
-            | head -n 1 | sed 's/.*SHA1: *//' | tr -d ':' | tr '[:lower:]' '[:upper:]')"
+          KEY_SHA1="$(
+            grep -i 'SHA1:' "$RUNNER_TEMP/keystore-signature.txt" \
+            | head -n 1 \
+            | sed 's/.*SHA1: *//' \
+            | tr -d ':' \
+            | tr '[:lower:]' '[:upper:]'
+          )"
 
           if [ -z "$APK_SHA1" ] || [ -z "$KEY_SHA1" ]; then
             echo "::error::Could not read signing fingerprints"
@@ -279,7 +348,7 @@ jobs:
           echo "KEY SHA-1: $KEY_SHA1"
 
           if [ "$APK_SHA1" != "$KEY_SHA1" ]; then
-            echo "::error::APK fingerprint does not match restored Firebase debug keystore"
+            echo "::error::APK SHA-1 does not match the restored keystore"
             exit 1
           fi
 
